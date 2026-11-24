@@ -1,175 +1,132 @@
 """
-test_agent.py - Test script for the AI Grid Agent
-
-Run this to test the agent locally before deploying.
+test_agent.py - Test suite for Dual-Provider AI Grid Agent (Gemini + Ollama)
 """
 
-import json
 import os
 import sys
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv()
 
 from agent_orchestrator import (
-    create_grid_agent,
-    OllamaConfig,
+    AgentConfig,
     EnergyPool,
-    ThermalManager,
-    ReserveManager,
-    LoadPrioritizer,
     LoadBalancer,
-    ScheduleOptimizer
+    LoadPrioritizer,
+    ReserveManager,
+    ScheduleOptimizer,
+    ThermalManager,
+    create_grid_agent,
 )
 
-def print_section(title):
-    """Print a formatted section header"""
-    print("\n" + "="*80)
+
+def print_section(title: str):
+    print("\n" + "=" * 76)
     print(f"  {title}")
-    print("="*80)
+    print("=" * 76)
+
 
 def test_energy_pool():
-    """Test energy pool management"""
-    print_section("1. Energy Pool Management")
+    print_section("1. Energy Pool & Live Sync")
     pool = EnergyPool()
+    pool.sync_from_grid({
+        "simulated_hour": 13.0,
+        "generation": {"solar_wind": 240.0, "plant1": 160.0, "plant2": 160.0},
+        "battery_delta": 35.0,
+    })
     status = pool.get_status()
-    print(f"Total Capacity: {status['total_capacity']} MW")
-    print(f"Total Output: {status['total_output']} MW")
-    print(f"Renewable Available: {status['total_renewable_available']} MW")
-    print(f"Non-Renewable Available: {status['total_nonrenewable_available']} MW")
-    print("\nEnergy Sources:")
-    for name, source in status['sources'].items():
-        print(f"  {source['name']:20} | Type: {source['source_type']:12} | Capacity: {source['capacity_mw']:6.1f} MW | Output: {source['current_output_mw']:6.1f} MW")
+    assert status["total_capacity"] > 1000
+    assert status["total_output"] > 0
+    print(f"Total Capacity: {status['total_capacity']} MW | Live Output: {status['total_output']} MW")
 
-def test_thermal_management():
-    """Test thermal management"""
-    print_section("2. Thermal Management")
+
+def test_thermal_and_reserve():
+    print_section("2. Thermal & Reserve Adequacy")
     thermal = ThermalManager()
-    status = thermal.get_thermal_status()
-    print(f"Current Temperature: {status['current_temp_celsius']}°C")
-    print(f"Max Safe: {status['max_safe_temp']}°C")
-    print(f"Critical: {status['critical_temp']}°C")
-    print(f"Status: {status['status']}")
-    print(f"Cooling Capacity: {status['cooling_capacity_mw']} MW")
-    
-    # Test temperature impact
-    print("\nTemperature Impact Calculation:")
-    for load in [100, 300, 600]:
-        impact = thermal.calculate_temp_impact(load)
-        print(f"  {load} MW load → +{impact:.2f}°C increase")
+    thermal.sync_from_load(620.0)
+    t_status = thermal.get_thermal_status()
+    assert t_status["status"] == "NORMAL"
 
-def test_reserve_management():
-    """Test reserve management"""
-    print_section("3. Reserve and Backup Management")
     reserve = ReserveManager()
-    status = reserve.check_reserve_adequacy(800.0, 700.0)
-    print(f"Demand: 800 MW | Supply: 700 MW")
-    print(f"Deficit: {status['deficit_mw']} MW")
-    print(f"Reserve Needed: {status['reserve_needed_mw']} MW")
-    print(f"Reserve Available: {status['reserve_available_mw']} MW")
-    print(f"Reserve Adequate: {status['reserve_adequate']}")
-    print(f"Backup Active: {status['backup_active']}")
-    print(f"Fuel Reserve Days: {status['backup_fuel_days']}")
+    r_status = reserve.check_reserve_adequacy(650.0, 650.0, battery_mw=220.0)
+    assert r_status["reserve_adequate"] is True
+    print(f"Temp: {t_status['current_temp_celsius']}C ({t_status['status']}) | Reserve Adequate: {r_status['reserve_adequate']}")
 
-def test_load_prioritization():
-    """Test intelligent load prioritization"""
-    print_section("4. Load Prioritization")
+
+def test_load_prioritization_and_balancing():
+    print_section("3. 6-Zone Load Prioritization & Balancing")
     prioritizer = LoadPrioritizer()
-    
     loads = {
-        "hospital": 80.0,
-        "school": 110.0,
+        "hospital": 95.0,
         "industry": 160.0,
-        "residential": 400.0
+        "school": 110.0,
+        "commercial": 135.0,
+        "residential": 180.0,
+        "ev_hub": 95.0,
     }
-    
     conditions = {
         "total_demand": sum(loads.values()),
-        "thermal_status": {"status": "WARNING", "current_temp_celsius": 50.0},
-        "reserve_status": {"reserve_adequate": False}
+        "thermal_status": {"status": "WARNING", "current_temp_celsius": 47.0},
+        "reserve_status": {"reserve_adequate": False},
     }
-    
-    result = prioritizer.prioritize(loads, conditions)
-    print(f"Grid Urgency Level: {result['urgency_level']}")
-    print(f"\nActions:")
-    for action in result['actions']:
-        print(f"  {action}")
-    
-    print(f"\nLoad Shedding Plan:")
-    for entity, shed in result['shedding_plan'].items():
-        if shed > 0:
-            pct = (shed / loads.get(entity, 1)) * 100
-            print(f"  {entity.capitalize():15} → Shed {shed:.1f} MW ({pct:.0f}%)")
+    res = prioritizer.prioritize(loads, conditions)
+    assert res["shedding_plan"]["hospital"] == 0.0, "Hospital must never be shed"
+    assert res["shedding_plan"]["ev_hub"] > 0.0, "Deferrable EV Hub should be shed first"
+    print(f"Urgency: {res['urgency_level']} | Shed Plan: {res['shedding_plan']}")
 
-def test_load_balancing():
-    """Test load balancing across sources"""
-    print_section("5. Load Balancing")
     balancer = LoadBalancer()
     pool = EnergyPool()
-    
-    demand = 750.0
-    preferences = {"renewable_preference": 0.70}
-    
-    result = balancer.balance(demand, pool, preferences)
-    print(f"Demand: {demand} MW")
-    print(f"Renewable Used: {result['renewable_used_mw']} MW")
-    print(f"Non-Renewable Used: {result['nonrenewable_used_mw']} MW")
-    print(f"Unmet Demand: {result['unmet_demand_mw']} MW")
-    print(f"Renewable Efficiency: {result['efficiency_score']:.1f}%")
-    print(f"Total Cost: ${result['total_cost_usd']:.2f}")
-    print(f"Total CO2: {result['total_co2_kg']:.0f} kg")
+    bal = balancer.balance(650.0, pool, {"renewable_preference": 0.70})
+    assert bal["unmet_demand_mw"] == 0.0
+    print(f"Balanced 650 MW -> Renewable: {bal['renewable_used_mw']} MW, Thermal: {bal['nonrenewable_used_mw']} MW")
 
-def test_schedule_optimization():
-    """Test time-aware schedule optimization"""
-    print_section("6. Schedule Optimization")
-    
-    test_hours = [6, 9, 15, 18, 21]
-    for hour in test_hours:
-        schedule = ScheduleOptimizer.get_optimal_schedule(hour, 750.0)
-        print(f"\nTime: {hour:02d}:00")
-        print(f"  Period: {schedule['period']}")
-        print(f"  Recommendation: {schedule['recommendation']}")
-        print(f"  Optimal Renewable %: {schedule['optimal_renewable_percentage']*100:.0f}%")
 
-def test_agent_configuration():
-    """Test agent configuration with remote Ollama"""
-    print_section("7. Agent Configuration")
-    
-    # Get from environment or use defaults
-    endpoint = os.getenv("OLLAMA_ENDPOINT", "http://localhost:11434")
-    model = os.getenv("OLLAMA_MODEL", "mistral")
-    
-    print(f"Ollama Endpoint: {endpoint}")
-    print(f"Model Name: {model}")
-    print(f"\nTo use a remote Ollama instance, set environment variables:")
-    print(f"  export OLLAMA_ENDPOINT=http://your-laptop-ip:11434")
-    print(f"  export OLLAMA_MODEL=mistral")
-    
-    # Don't actually create agent without Ollama running
-    print(f"\nAgent will be initialized when backend starts if Ollama is available.")
+def test_schedule_optimizer_night_fix():
+    print_section("4. Time-Aware Schedule (Including Night Wrap Fix)")
+    s_night_late = ScheduleOptimizer.get_optimal_schedule(22.5, 420.0)
+    s_night_early = ScheduleOptimizer.get_optimal_schedule(2.5, 310.0)
+    assert s_night_late["period"] == "NIGHT_OFFPEAK"
+    assert s_night_early["period"] == "NIGHT_OFFPEAK"
+    print(f"22:30 -> {s_night_late['period']} | 02:30 -> {s_night_early['period']}")
+
+
+def test_dual_provider_switching():
+    print_section("5. Dual-Provider Switching (Gemini 3.8 <-> Ollama)")
+    agent = create_grid_agent(
+        provider="gemini",
+        gemini_endpoint="https://generativelanguage.googleapis.com/v1beta",
+        gemini_model="gemini-3.8-flash",
+    )
+    cfg_gem = agent.config.safe_dict()
+    assert cfg_gem["provider"] == "gemini"
+    assert cfg_gem["active_model"] == "gemini-3.8-flash"
+    print(f"Primary Provider : {cfg_gem['provider']} ({cfg_gem['active_model']} @ {cfg_gem['active_endpoint']})")
+
+    # Test deterministic fallback when placeholder API key is present
+    out = agent.make_decision(
+        {"simulated_hour": 19.0, "total_demand": 710.0, "total_supply": 680.0, "battery_energy": 190.0},
+        "Analyze evening peak status.",
+    )
+    assert out["status"] in ("success", "fallback")
+    assert len(out["decision"]) > 40
+
+    # Instant switch back to Ollama
+    cfg_oll = agent.reconfigure(
+        provider="ollama",
+        ollama_endpoint="http://localhost:11434",
+        ollama_model="gemma3:4b",
+    )
+    assert cfg_oll["provider"] == "ollama"
+    assert cfg_oll["active_model"] == "gemma3:4b"
+    print(f"Switched Provider: {cfg_oll['provider']} ({cfg_oll['active_model']} @ {cfg_oll['active_endpoint']})")
+
 
 def main():
-    """Run all tests"""
-    print_section("SYNTAXED-IEGMS AI Grid Agent Test Suite")
-    
-    try:
-        test_energy_pool()
-        test_thermal_management()
-        test_reserve_management()
-        test_load_prioritization()
-        test_load_balancing()
-        test_schedule_optimization()
-        test_agent_configuration()
-        
-        print_section("All Tests Completed Successfully ✓")
-        
-    except Exception as e:
-        print_section("Test Failed ✗")
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    print_section("SYNTAXED-IEGMS V3 AI Grid Agent Test Suite")
+    test_energy_pool()
+    test_thermal_and_reserve()
+    test_load_prioritization_and_balancing()
+    test_schedule_optimizer_night_fix()
+    test_dual_provider_switching()
+    print_section("All AI Agent Tests Completed Successfully")
+
 
 if __name__ == "__main__":
     main()

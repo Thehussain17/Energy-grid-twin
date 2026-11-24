@@ -1,8 +1,8 @@
 # Syntaxed-IEGMS (Intelligent Energy Grid Management System)
 
-> **Quantexera Hackathon 2026** · Real-time grid monitoring + ML prediction + optimization dashboard + **AI Agent**
+> **Quantexera Hackathon 2026** · Autonomous 3D Smart Grid Digital Twin + ML Forecasting + Priority Load Shedding + **Dual-Provider IEGMS AI Agent (Gemini & Ollama)**
 
-### Team members:
+### Team Members
 - Prashant Goundadkar
 - Hussain Shaikh
 - Abhishek A Pillai
@@ -11,171 +11,110 @@
 
 ---
 
-##  Architecture
+## Architecture
 
 ```
-┌─────────────────────┐     MQTT (broker.hivemq.com)      ┌─────────────────────┐
-│   IoT Simulator     │  ──────────────────────────────►  │   FastAPI Backend   │
-│  simulator.py       │   topic: iegms/syntaxed/grid/data  │   main.py           │
-│  (publishes every   │                                    │   mqtt_client.py    │
-│   2 seconds)        │ ◄───────────────────────────────   │   ml_model.py       │
-│                     │   topic: .../time_sync             │   optimizer.py      │
-└─────────────────────┘                                    │   agent_orchestrator│
-                                                           └──────────┬──────────┘
-                                                                      │ REST API
-                                                                      │ (HTTP polling)
-                                                           ┌──────────▼──────────┐
-                                                           │   Frontend (3D)     │
-                                                           │   index.html        │
-                                                           │   app.js / style.css│
-                                                           │   Three.js          │
-                                                           └─────────────────────┘
-```
-
-## Folder Structure
-
-```
-project-root/
-├── backend/
-│   ├── main.py                   ← FastAPI server (with AI agent endpoints)
-│   ├── agent_orchestrator.py     ← AI Grid Agent (Ollama/LangChain, optional)
-│   ├── mqtt_client.py            ← MQTT subscriber + in-memory store
-│   ├── ml_model.py               ← Linear interpolation load predictor
-│   ├── optimizer.py              ← Priority load shedding + battery logic
-│   ├── test_agent.py             ← AI agent test suite
-│   ├── example_client.py         ← Example API client
-│   ├── requirements.txt          ← Dependencies
-│   └── .env.example              ← Configuration template
-├── simulator/
-│   └── simulator.py              ← IoT load data publisher (MQTT)
-├── frontend/
-│   ├── index.html                ← 3D Simulation UI
-│   ├── app.js                    ← Three.js scene + API polling
-│   └── style.css                 ← Dark-mode glassmorphism design
-└── README.md
+┌─────────────────────────┐    MQTT (broker.hivemq.com)     ┌──────────────────────────────┐
+│     IoT Simulator       │ ──────────────────────────────► │       FastAPI V3 Engine      │
+│   simulator.py (6 zones)│  iegms/syntaxed/grid/data       │  main.py · optimizer.py      │
+│   (2s stream + fallback)│ ◄────────────────────────────── │  ml_model.py · mqtt_client.py│
+└─────────────────────────┘  iegms/syntaxed/grid/time_sync  │  agent_orchestrator.py       │
+                                                            └──────────────┬───────────────┘
+                                                                           │ REST API
+                                                              ┌────────────▼────────────┐
+                                                              │  AI Provider Adapter    │
+                                                              │  AI_PROVIDER=gemini     │
+                                                              │  or AI_PROVIDER=ollama  │
+                                                              └────────────┬────────────┘
+                                                                           │
+                                                            ┌──────────────▼───────────────┐
+                                                            │   3D Digital Twin + SCADA UI │
+                                                            │   Three.js + Chart.js + HUD  │
+                                                            │   IEGMS Grid AI Drawer       │
+                                                            └──────────────────────────────┘
 ```
 
 ---
 
-## How to Run
+## Quick Start
 
-### 1. Install Python Dependencies
-
+### 1. Install Dependencies
 ```bash
 cd backend
 pip install -r requirements.txt
 ```
 
-### 2. Start the Backend (Terminal 1)
+### 2. Configure Environment (`backend/.env`)
+Copy `backend/.env.example` to `backend/.env` and set your Gemini API key (or switch `AI_PROVIDER=ollama` anytime to revert to Ollama):
 
+```env
+# Switch between "gemini" and "ollama" anytime
+AI_PROVIDER=gemini
+
+# Google Gemini Configuration (Latest Gemini 3.8 / Gemini 4 Models)
+GEMINI_API_KEY=your_gemini_api_key_here
+GEMINI_MODEL=gemini-3.8-flash
+GEMINI_ENDPOINT=https://generativelanguage.googleapis.com/v1beta
+
+# Ollama Configuration (Instant Fallback)
+OLLAMA_ENDPOINT=http://localhost:11434
+OLLAMA_MODEL=gemma3:4b
+
+# MQTT Configuration
+MQTT_BROKER=broker.hivemq.com
+MQTT_PORT=1883
+MQTT_TOPIC_DATA=iegms/syntaxed/grid/data
+MQTT_TOPIC_SYNC=iegms/syntaxed/grid/time_sync
+```
+
+### 3. Start the Backend Engine (Serves Both API & Frontend on `:8000`)
 ```bash
 cd backend
 python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
+- **3D Digital Twin & Dashboard**: http://localhost:8000
+- **Interactive Swagger API Docs**: http://localhost:8000/docs
 
-The API will be available at `http://localhost:8000`
-Interactive docs: `http://localhost:8000/docs`
+*(Note: The backend includes an automatic internal telemetry stream when running standalone, and seamlessly switches to live MQTT readings as soon as `simulator/simulator.py` connects.)*
 
-### 3. Start the IoT Simulator (Terminal 2)
-
+### 4. Optional: Start the External MQTT IoT Simulator
 ```bash
 cd simulator
 python simulator.py
 ```
 
-The simulator publishes a new grid reading every **2 seconds** via MQTT.
+---
 
-### 4. Open the Frontend
+## Smart-Grid Zones & Priority Hierarchy
 
-```bash
-cd frontend
-python -m http.server 3000
-# Visit http://localhost:3000
-```
+| Priority | Zone | Schedule Window | Off-Hours Cap | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| **Tier 1 (Critical)** | Medical Center | 24/7 Always On | 100% | Clinical tower, surgical wing & helipad — never shed |
+| **Tier 2 (High)** | Industrial Park | 05:00 – 19:00 | 10% | Manufacturing hall, logistics warehouse & stacks |
+| **Tier 3 (Med-High)** | University Campus | 07:00 – 17:00 | 5% | Academic quad, clock tower & rooftop solar |
+| **Tier 4 (Medium)** | Commercial Towers | 08:00 – 21:00 | 15% | Downtown skyscrapers & data center annex |
+| **Tier 5 (Standard)** | Residential District | 06:00 – 23:00 | 50% | Mid-rise apartments, townhouses & evening surge |
+| **Tier 6 (Deferrable)** | EV Supercharger Hub | 07:00 – 22:00 | 25% | Solar-canopy fast chargers — throttled first on deficit |
 
-The dashboard auto-refreshes every 2 seconds.
+**Generation & Storage Assets**:
+- **Solar + Wind Farm (`280 MW` clean)** — Dispatched first (zero marginal CO₂), animated 3-blade wind turbines + PV arrays
+- **Thermal Plants 1 & 2 (`2 × 300 MW` CCGT)** — Dispatchable combined-cycle generation with live breaker toggles
+- **Utility BESS Megapack Yard (`400 MWh`)** — Charges on clean/off-peak surplus; proactively boosts morning (`08–09h`) & evening (`18–21h`) peaks
 
 ---
 
-##AI Agent (Optional)
+## API Reference
 
-An **Ollama + LangChain-powered AI agent** is included for intelligent grid management decisions.
-
-### Setup
-
-1. Install optional dependencies:
-```bash
-pip install langchain langchain-community ollama
-```
-
-2. Run Ollama on a machine (locally or remote):
-```bash
-ollama serve
-ollama pull gemma3:1b
-```
-
-3. Configure the endpoint:
-```env
-# backend/.env
-OLLAMA_ENDPOINT=http://localhost:11434
-OLLAMA_MODEL=mistral
-```
-
-### AI Agent Endpoints
-
-| Method | Endpoint           | Description                     |
-|--------|-------------------|---------------------------------|
-| POST   | `/agent/configure` | Configure Ollama endpoint/model |
-| GET    | `/agent/config`    | Get agent configuration         |
-| POST   | `/agent/decide`    | Request AI grid decision        |
-| GET    | `/agent/status`    | Get agent status & analysis     |
-
----
-
-## 🔌 Grid API Endpoints
-
-| Method | Endpoint      | Description                                  |
-|--------|---------------|----------------------------------------------|
-| GET    | `/health`     | Health check                                 |
-| GET    | `/data`       | Last 20 MQTT grid readings                   |
-| GET    | `/optimize`   | Optimization decision + battery/shed status  |
-| POST   | `/set_time`   | Jump simulation to a specific hour           |
-| GET    | `/docs`       | Interactive Swagger UI                       |
-
----
-
-## Optimization Logic
-
-| Condition                     | Status          | Action                                  |
-|-------------------------------|------------------|-----------------------------------------|
-| Load ≤ 900 MW                 | ✅ Normal        | Charge battery with excess              |
-| Load > 900 MW (battery helps) | ⚠️ Warning       | Discharge battery, alert                |
-| Load > 900 MW (still deficit) | 🚨 Critical      | Shed by priority (Residential → School) |
-
-**Priority**: Hospital > School > Industry > Residential
-
----
-
-## Demo Script (For Judges)
-
-1. **Open the 3D dashboard** — live voxel city with real-time telemetry
-2. **Drag the Time Slider** — watch buildings light up/dim as day turns to night
-3. **Power Plants** — two plants feed the grid battery via blue supply lines
-4. **Orchestrator Log** — AI takes live shedding decisions every 2 seconds
-5. **Battery Meter** — charges when excess grid power, discharges on peak demand
-6. **Status badge** — NORMAL → WARNING → CRITICAL as load increases
-
----
-
-## 🛠️ Tech Stack
-
-| Layer         | Technology                        |
-|---------------|-----------------------------------|
-| Backend       | Python 3.11+, FastAPI, Uvicorn    |
-| ML            | Custom time-interpolation model   |
-| AI Agent      | LangChain + Ollama (optional)     |
-| IoT Transport | MQTT via paho-mqtt                |
-| MQTT Broker   | broker.hivemq.com (public)        |
-| Frontend 3D   | HTML5, Three.js r128              |
-| Styling       | Vanilla CSS (dark glassmorphism)  |
-| Storage       | In-memory deque (no DB required)  |
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/health` | Engine health, simulated clock, MQTT & active AI provider |
+| `GET` | `/optimize` | Live 6-zone dispatch, renewable share, BESS SoC & shedding state |
+| `GET` | `/data` | Recent multi-zone telemetry readings |
+| `GET` | `/api/forecast` | 24-hour ML demand & clean renewable forecast curves |
+| `POST` | `/set_time` | Jump simulation clock to any hour (`0.0` – `23.99`) |
+| `POST` | `/api/sim/control` | Play/pause clock or set simulation speed (`1x`, `2x`, `5x`) |
+| `POST` | `/api/plant/toggle` | Trip or restore `solar_wind`, `plant1`, or `plant2` |
+| `POST` | `/api/load/override` | Inject manual MW load spikes on any zone (or `"reset"`) |
+| `GET` | `/agent/config` | View active AI provider (`gemini` or `ollama`), model & endpoint |
+| `POST` | `/agent/configure` | Switch between Gemini and Ollama or update model/endpoint at runtime |
+| `POST` | `/agent/decide` | Query IEGMS Grid AI Agent with live telemetry context |

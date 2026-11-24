@@ -1,10 +1,7 @@
-fastapi>=0.110.0
-uvicorn[standard]>=0.29.0
-paho-mqtt>=1.6.1
-scikit-learn>=1.4.0
-pydantic>=2.0.0
-python-dotenv>=1.0.0
-
-# Optional: AI Agent (requires Ollama running locally or remotely)
-# langchain>=0.3.0
-# langchain-ollama>=0.2.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+paho-mqtt>=2.1.0
+pydantic>=2.9.0
+python-dotenv>=1.0.1
+httpx>=0.28.0
+google-genai>=1.0.0

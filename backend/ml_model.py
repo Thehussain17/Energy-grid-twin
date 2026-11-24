@@ -1,107 +1,107 @@
 """
-ml_model.py - Pure-Python ML Model for Multi-Entity Grid Load Prediction
+ml_model.py - Pure-Python ML Model for Multi-Entity Grid Load & Renewable Prediction
 
-Uses a pure Python K-Nearest Neighbors / Interpolation approach to predict
-the load of 4 distinct entities based on the time of day (0.0 to 24.0).
-Incorporates time-based activity patterns:
-  - Hospital: 24/7 operations (constant high baseline)
-  - School: Active 8 AM - 5 PM (8:00-17:00), heavy morning/afternoon peak
-  - Industry: Active 6 AM - 6 PM (6:00-18:00), two shifts with peaks
-  - Residential: Night heavy (6 PM - 11 PM), morning rush (6 AM - 8 AM), sleeping (11 PM - 6 AM)
+Uses smooth piecewise interpolation across 6 distinct smart-grid zones plus
+a solar/wind renewable generation curve based on time of day (0.0 to 24.0):
+  - Hospital:    24/7 critical operations (high constant baseline)
+  - Industry:    Active 05:00 - 19:00, two heavy production shifts
+  - School:      Active 07:00 - 17:00, daytime campus operations
+  - Commercial:  Active 08:00 - 21:00, downtown towers, servers & HVAC
+  - Residential: Morning rush (06:00 - 08:30) + heavy evening peak (18:00 - 22:30)
+  - EV Hub:      Commuter fast-charging spikes (07:30 - 09:30 & 17:30 - 22:00)
 """
 
-# Base theoretical load curves for the 4 entities (hour: load in MW)
-# We define anchor points, and interpolate between them.
-# These reflect realistic daily patterns with time-based activities
+# Realistic 24-hour demand anchor curves (hour -> load in MW)
 PROFILES = {
     "hospital": {
-        # High baseline, constant 24/7 operations
-        # Minor peaks during day, slightly reduces night staff
-        0: 78, 6: 82, 12: 105, 18: 95, 24: 78
-    },
-    "school": {
-        # Dormant at night, rapid increase at 8 AM (classes start)
-        # Peak during school hours (8 AM - 3 PM)
-        # Drops sharply after 5 PM (closure)
-        0: 8, 6: 12, 7: 15, 8: 95, 12: 125, 15: 100, 17: 25, 18: 20, 24: 8
+        0: 76, 5: 78, 8: 94, 12: 108, 16: 102, 20: 90, 24: 76
     },
     "industry": {
-        # Two work shifts: 6 AM - 12 PM and 12 PM - 6 PM
-        # Heavy machinery operation during these hours
-        # Minimal overnight (security/maintenance only)
-        0: 25, 5: 30, 6: 140, 12: 165, 13: 155, 18: 60, 19: 40, 24: 25
+        0: 24, 5: 32, 6: 138, 9: 162, 12: 170, 15: 160, 18: 72, 20: 28, 24: 24
+    },
+    "school": {
+        0: 6, 6: 10, 7: 35, 8: 92, 12: 118, 15: 98, 17: 22, 19: 8, 24: 6
+    },
+    "commercial": {
+        0: 22, 6: 28, 8: 85, 11: 132, 14: 145, 18: 120, 21: 58, 23: 26, 24: 22
     },
     "residential": {
-        # Sleeping low load (0 AM - 6 AM)
-        # Morning rush peak (6 AM - 8 AM) - breakfast, showers, AC
-        # Daytime lower (most people at work/school)
-        # Evening peak (6 PM - 10 PM) - cooking, heating, entertainment
-        # Late night drops (10 PM onwards)
-        0: 35, 6: 65, 8: 70, 9: 50, 15: 50, 18: 155, 21: 190, 23: 80, 24: 35
-    }
+        0: 34, 5: 30, 7: 86, 9: 56, 14: 52, 17: 95, 19: 178, 21: 198, 23: 72, 24: 34
+    },
+    "ev_hub": {
+        0: 14, 6: 18, 8: 68, 10: 42, 14: 38, 17: 74, 19: 112, 21: 92, 23: 28, 24: 14
+    },
+}
+
+# Clean renewable output curve (Solar PV + Wind Farm combined capacity up to 280 MW)
+RENEWABLE_PROFILE = {
+    0: 48,   # Night wind baseline
+    5: 52,
+    6: 68,   # Dawn
+    8: 135,  # Morning solar ramp
+    11: 238,
+    13: 262, # Solar noon + afternoon breeze
+    15: 228,
+    17: 130,
+    18: 72,  # Dusk solar drop-off
+    20: 58,  # Evening wind
+    24: 48,
 }
 
 
 def _interpolate(hour: float, curve: dict) -> float:
-    """Linear interpolation between anchor points in a daily curve."""
-    # Wrap hour to 0-24
+    """Smooth cosine-assisted interpolation between anchor points in a 24h curve."""
+    import math
+
     hour = hour % 24.0
-    
     times = sorted(curve.keys())
     for i in range(len(times) - 1):
-        t1, t2 = times[i], times[i+1]
+        t1, t2 = times[i], times[i + 1]
         if t1 <= hour <= t2:
             v1, v2 = curve[t1], curve[t2]
-            # y = mx + c
-            fraction = (hour - t1) / (t2 - t1) if (t2 - t1) > 0 else 0
-            return v1 + fraction * (v2 - v1)
-            
-    return curve[times[0]]
+            fraction = (hour - t1) / (t2 - t1) if (t2 - t1) > 0 else 0.0
+            # Cosine smoothing avoids jagged linear corners on charts
+            smooth_t = (1.0 - math.cos(fraction * math.pi)) * 0.5
+            return v1 + smooth_t * (v2 - v1)
+    return float(curve[times[0]])
 
 
 def predict_load(hour: float, entity_type: str) -> float:
-    """
-    Predict the exact base load for an entity at a given time of day.
-    Takes into account time-based activity patterns (school hours, work shifts, etc.)
-    """
+    """Predict the expected load (MW) for an entity at a given hour of day."""
     if entity_type not in PROFILES:
         return 0.0
-    
-    base = _interpolate(hour, PROFILES[entity_type])
-    
-    # Apply activity modifiers based on entity type and time
-    multiplier = 1.0
-    
-    if entity_type == "school":
-        # School load is 0 when closed (5 PM - 8 AM next day)
-        if hour >= 17 or hour < 8:
-            multiplier = 0.1  # Minimal load after hours (security, HVAC)
-        elif hour >= 8 and hour < 17:
-            multiplier = 1.0  # Full load during school hours
-        
-    elif entity_type == "industry":
-        # Factory load is minimal outside work hours
-        if hour >= 18 or hour < 6:
-            multiplier = 0.3  # Minimum load for security and maintenance
-        elif hour >= 6 and hour < 18:
-            multiplier = 1.0  # Full production during work hours
-    
-    elif entity_type == "residential":
-        # Sleeping loads are minimal
-        if hour >= 23 or hour < 6:
-            multiplier = 0.4 if hour >= 23 or hour < 6 else 1.0  # Sleeping is very low load
-        elif hour >= 6 and hour < 8:
-            multiplier = 1.2  # Morning rush - breakfast, showers, AC
-        elif hour >= 18 and hour < 22:
-            multiplier = 1.1  # Evening peak - cooking, heating
-    
-    return round(base * multiplier, 2)
+    return round(max(0.0, _interpolate(hour, PROFILES[entity_type])), 2)
 
 
-def predict_all(hour: float) -> dict:
-    """Predict load for all entities for the upcoming hour + 1 (future forecast)."""
-    future_hour = (hour + 1.0) % 24.0
+def predict_renewable_output(hour: float) -> float:
+    """Predict combined Solar PV + Wind renewable generation (MW) at a given hour."""
+    return round(max(0.0, _interpolate(hour, RENEWABLE_PROFILE)), 2)
+
+
+def predict_all(hour: float, horizon_hours: float = 1.0) -> dict:
+    """Predict load for all entities for `hour + horizon_hours` (default +1h forecast)."""
+    target_hour = (hour + horizon_hours) % 24.0
     return {
-        entity: predict_load(future_hour, entity)
+        entity: predict_load(target_hour, entity)
         for entity in PROFILES.keys()
+    }
+
+
+def get_24h_forecast_series() -> dict:
+    """Return full 24-hour curves for dashboard forecasting charts."""
+    hours = list(range(24))
+    by_entity = {
+        entity: [predict_load(float(h), entity) for h in hours]
+        for entity in PROFILES.keys()
+    }
+    total = [
+        round(sum(by_entity[e][i] for e in PROFILES.keys()), 2)
+        for i in range(24)
+    ]
+    renewable = [predict_renewable_output(float(h)) for h in hours]
+    return {
+        "hours": [f"{h:02d}:00" for h in hours],
+        "total_mw": total,
+        "renewable_mw": renewable,
+        "by_entity": by_entity,
     }
