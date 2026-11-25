@@ -4,7 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Autonomous Smart Grid Digital Twin</title>
-  <link rel="stylesheet" href="style.css?v=5.0">
+  <script>try{var th=localStorage.getItem("iegms-theme");if(th)document.documentElement.setAttribute("data-theme",th);}catch(e){}</script>
+  <link rel="stylesheet" href="style.css?v=6.0">
 
   <!-- Modern Three.js r187 (0.187.0) ES Module Import Map -->
   <script type="importmap">
@@ -29,7 +30,7 @@
       <svg class="ico" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
     </div>
     <div>
-      <div class="brand-title">SYNTAXED · IEGMS</div>
+      <div class="brand-title">AMULET</div>
       <div class="brand-sub">Smart Grid Digital Twin</div>
     </div>
   </div>
@@ -62,6 +63,10 @@
   </nav>
 
   <div class="topbar-right">
+    <button class="theme-btn" id="theme-toggle" onclick="toggleTheme()" title="Toggle Light / Dark Mode" aria-label="Toggle theme">
+      <svg class="ico ico-moon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+      <svg class="ico ico-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+    </button>
     <span class="engine-pill" id="engine-mode-pill" title="Telemetry Sync Mode">LIVE TWIN</span>
     <button class="ai-pill-btn" onclick="toggleCopilot()" title="Open IEGMS Grid AI Agent">
       <svg class="ico" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
@@ -694,10 +699,12 @@
   </div>
 </div>
 
-<script src="app.js?v=5.1"></script>
+<script src="app.js?v=6.2"></script>
 <script type="module">
   import * as THREE from 'three';
   import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+  import { Sky } from 'three/addons/objects/Sky.js';
+  import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
   import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
   import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
   import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
@@ -707,6 +714,8 @@
     window.__bootSmartGrid3D({
       THREE,
       OrbitControls,
+      Sky,
+      RoomEnvironment,
       EffectComposer,
       RenderPass,
       UnrealBloomPass,

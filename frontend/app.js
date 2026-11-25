@@ -225,6 +225,8 @@ const CAMERA_PRESETS = {
 window.__bootSmartGrid3D = function ({
   THREE,
   OrbitControls,
+  Sky,
+  RoomEnvironment,
   EffectComposer,
   RenderPass,
   UnrealBloomPass,
@@ -243,10 +245,10 @@ window.__bootSmartGrid3D = function ({
 
   const sz = getSize();
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x070d0b);
-  scene.fog = new THREE.FogExp2(0x070d0b, 0.0038);
+  scene.background = new THREE.Color(0x87b8de);
+  scene.fog = new THREE.FogExp2(0x9ec5e6, 0.0022);
 
-  const camera = new THREE.PerspectiveCamera(40, sz.w / sz.h, 1, 950);
+  const camera = new THREE.PerspectiveCamera(40, sz.w / sz.h, 1, 1400);
   camera.position.set(...CAMERA_PRESETS.overview.pos);
 
   const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
@@ -254,16 +256,36 @@ window.__bootSmartGrid3D = function ({
   renderer.setSize(sz.w, sz.h);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.05;
+  renderer.toneMappingExposure = 1.0;
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   container.innerHTML = "";
   container.appendChild(renderer.domElement);
 
-  // Post-Processing Composer with subtle UnrealBloom
+  // Realistic PBR Environment Reflections (for glass curtain walls, water & steel)
+  if (RoomEnvironment) {
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    if ("environmentIntensity" in scene) scene.environmentIntensity = 0.45;
+  }
+
+  // Physically-Based Preetham Atmospheric Sky Shader
+  let sky = null;
+  if (Sky) {
+    sky = new Sky();
+    sky.scale.setScalar(4500);
+    scene.add(sky);
+    const u = sky.material.uniforms;
+    u.turbidity.value = 4.5;
+    u.rayleigh.value = 1.8;
+    u.mieCoefficient.value = 0.005;
+    u.mieDirectionalG.value = 0.82;
+  }
+
+  // Subtle Post-Processing Composer (gentle night bloom only on bright lights)
   const composer = new EffectComposer(renderer);
   composer.addPass(new RenderPass(scene, camera));
-  const bloomPass = new UnrealBloomPass(new THREE.Vector2(sz.w, sz.h), 0.36, 0.35, 0.78);
+  const bloomPass = new UnrealBloomPass(new THREE.Vector2(sz.w, sz.h), 0.22, 0.3, 0.88);
   composer.addPass(bloomPass);
   composer.addPass(new OutputPass());
 
@@ -273,14 +295,24 @@ window.__bootSmartGrid3D = function ({
   controls.dampingFactor = 0.065;
   controls.maxPolarAngle = Math.PI * 0.465;
   controls.minDistance = 24;
-  controls.maxDistance = 220;
+  controls.maxDistance = 230;
   controls.target.set(...CAMERA_PRESETS.overview.target);
 
   const camLerpGoal = { active: false, pos: new THREE.Vector3(), target: new THREE.Vector3() };
   controls.addEventListener("start", () => { camLerpGoal.active = false; });
 
-  // ── High-DPI Procedural Architectural Facade Texture Generator ──
-  function makeFacadeMaterial({ baseHex, mullionHex, litPalette, cols = 8, rows = 14, litRatio = 0.65, metalness = 0.55, roughness = 0.25 }) {
+  // ── Realistic Architectural Facade Generator (Day Reflective Glass + Warm Night Interior) ──
+  function makeFacadeMaterial({
+    wallHex,
+    mullionHex,
+    dayGlassHex = "#3d5a73",
+    nightLitPalette = ["#fff1c9", "#ffe29e", "#e8f1fa"],
+    cols = 8,
+    rows = 14,
+    litRatio = 0.65,
+    metalness = 0.45,
+    roughness = 0.28,
+  }) {
     const cDiff = document.createElement("canvas");
     const cEmis = document.createElement("canvas");
     cDiff.width = cEmis.width = 256;
@@ -288,21 +320,20 @@ window.__bootSmartGrid3D = function ({
     const dCtx = cDiff.getContext("2d");
     const eCtx = cEmis.getContext("2d");
 
-    dCtx.fillStyle = baseHex;
+    dCtx.fillStyle = wallHex;
     dCtx.fillRect(0, 0, 256, 512);
     eCtx.fillStyle = "#000000";
     eCtx.fillRect(0, 0, 256, 512);
 
-    const padX = 5, padY = 6;
+    const padX = 6, padY = 7;
     const cellW = 256 / cols;
     const cellH = 512 / rows;
 
-    // Seeded pseudo-random for crisp deterministic floors
     let seed = cols * 97 + rows * 31;
     const rnd = () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; };
 
     for (let r = 0; r < rows; r++) {
-      const floorLitBoost = rnd() > 0.25 ? 1 : 0.3;
+      const floorWeight = rnd() > 0.22 ? 1.0 : 0.35;
       for (let c = 0; c < cols; c++) {
         const x = c * cellW + padX * 0.5;
         const y = r * cellH + padY * 0.5;
@@ -312,15 +343,15 @@ window.__bootSmartGrid3D = function ({
         dCtx.fillStyle = mullionHex;
         dCtx.fillRect(x - 1, y - 1, w + 2, h + 2);
 
-        if (rnd() < litRatio * floorLitBoost) {
-          const col = litPalette[Math.floor(rnd() * litPalette.length)];
-          dCtx.fillStyle = col;
-          dCtx.fillRect(x, y, w, h);
-          eCtx.fillStyle = col;
+        // Daytime diffuse always shows realistic tinted architectural glass!
+        const glassShade = rnd() > 0.5 ? dayGlassHex : "#2c4459";
+        dCtx.fillStyle = glassShade;
+        dCtx.fillRect(x, y, w, h);
+
+        // Emissive map lights up interior rooms naturally at dusk/night!
+        if (rnd() < litRatio * floorWeight) {
+          eCtx.fillStyle = nightLitPalette[Math.floor(rnd() * nightLitPalette.length)];
           eCtx.fillRect(x, y, w, h);
-        } else {
-          dCtx.fillStyle = "#0c1318";
-          dCtx.fillRect(x, y, w, h);
         }
       }
     }
@@ -336,68 +367,84 @@ window.__bootSmartGrid3D = function ({
       map: diffTex,
       emissiveMap: emisTex,
       emissive: new THREE.Color(0xffffff),
-      emissiveIntensity: 0.45,
+      emissiveIntensity: 0.0, // Controlled naturally by sun elevation!
       metalness,
       roughness,
     });
   }
 
   const zoneMats = {
-    hospital:    makeFacadeMaterial({ baseHex: "#dbe5e0", mullionHex: "#94a39c", litPalette: ["#a7f3d0", "#ecfdf5", "#6ee7b7"], cols: 8, rows: 12, litRatio: 0.85, metalness: 0.3, roughness: 0.35 }),
-    commercial:  makeFacadeMaterial({ baseHex: "#0d1a16", mullionHex: "#1b2e27", litPalette: ["#00e676", "#bbf7d0", "#dcfce7"], cols: 10, rows: 22, litRatio: 0.72, metalness: 0.78, roughness: 0.16 }),
-    residential: makeFacadeMaterial({ baseHex: "#1c2421", mullionHex: "#2a3530", litPalette: ["#fde68a", "#fef3c7", "#fcd34d"], cols: 6, rows: 12, litRatio: 0.68, metalness: 0.2, roughness: 0.6 }),
-    industry:    makeFacadeMaterial({ baseHex: "#1e2623", mullionHex: "#2d3833", litPalette: ["#fde047", "#a7f3d0"], cols: 8, rows: 5, litRatio: 0.6, metalness: 0.45, roughness: 0.55 }),
-    school:      makeFacadeMaterial({ baseHex: "#5c3422", mullionHex: "#3e2216", litPalette: ["#fef08a", "#fde68a"], cols: 10, rows: 6, litRatio: 0.75, metalness: 0.12, roughness: 0.7 }),
-    ev_hub:      new THREE.MeshStandardMaterial({ color: 0x00e676, emissive: 0x00e676, emissiveIntensity: 0.9, roughness: 0.2, metalness: 0.5 }),
-    battery:     new THREE.MeshStandardMaterial({ color: 0x00e676, emissive: 0x00e676, emissiveIntensity: 0.85, roughness: 0.2, metalness: 0.5 }),
+    hospital: makeFacadeMaterial({
+      wallHex: "#e8edf2", mullionHex: "#cbd5e1", dayGlassHex: "#6495b8",
+      nightLitPalette: ["#f8fafc", "#fffbeb", "#e0f2fe"], cols: 8, rows: 12, litRatio: 0.85, metalness: 0.25, roughness: 0.35,
+    }),
+    commercial: makeFacadeMaterial({
+      wallHex: "#334e68", mullionHex: "#829ab1", dayGlassHex: "#486581",
+      nightLitPalette: ["#fff3d1", "#fef9c3", "#e2f1ff"], cols: 10, rows: 22, litRatio: 0.72, metalness: 0.75, roughness: 0.16,
+    }),
+    residential: makeFacadeMaterial({
+      wallHex: "#c9b8a8", mullionHex: "#8d7b6d", dayGlassHex: "#3b5266",
+      nightLitPalette: ["#ffd88a", "#ffe8b3", "#ffcf70"], cols: 6, rows: 12, litRatio: 0.68, metalness: 0.12, roughness: 0.68,
+    }),
+    residentialBrick: makeFacadeMaterial({
+      wallHex: "#9e5a47", mullionHex: "#d6ccc2", dayGlassHex: "#334756",
+      nightLitPalette: ["#ffd88a", "#ffe8b3"], cols: 5, rows: 9, litRatio: 0.65, metalness: 0.1, roughness: 0.75,
+    }),
+    industry: makeFacadeMaterial({
+      wallHex: "#64748b", mullionHex: "#475569", dayGlassHex: "#334155",
+      nightLitPalette: ["#fef08a", "#fde68a"], cols: 8, rows: 5, litRatio: 0.6, metalness: 0.45, roughness: 0.58,
+    }),
+    school: makeFacadeMaterial({
+      wallHex: "#9c4a35", mullionHex: "#dfd7ce", dayGlassHex: "#3d566e",
+      nightLitPalette: ["#fff1c2", "#fde68a"], cols: 10, rows: 6, litRatio: 0.75, metalness: 0.1, roughness: 0.72,
+    }),
+    ev_hub: new THREE.MeshStandardMaterial({ color: 0x38bdf8, emissive: 0x0ea5e9, emissiveIntensity: 0.5, roughness: 0.25, metalness: 0.4 }),
+    battery: new THREE.MeshStandardMaterial({ color: 0x22c55e, emissive: 0x16a34a, emissiveIntensity: 0.55, roughness: 0.25, metalness: 0.4 }),
   };
 
-  // Lighting
-  const hemiLight = new THREE.HemisphereLight(0xa7f3d0, 0x0b120f, 0.55);
+  // Natural Sunlight + Sky Bounce Hemisphere Light
+  const hemiLight = new THREE.HemisphereLight(0x9bd3ff, 0x4f5d4e, 0.75);
   scene.add(hemiLight);
 
-  const sunLight = new THREE.DirectionalLight(0xfff5e4, 1.45);
+  const sunLight = new THREE.DirectionalLight(0xfff7e8, 2.2);
   sunLight.castShadow = true;
   sunLight.shadow.mapSize.set(2048, 2048);
-  sunLight.shadow.camera.left = -100;
-  sunLight.shadow.camera.right = 100;
-  sunLight.shadow.camera.top = 100;
-  sunLight.shadow.camera.bottom = -100;
+  sunLight.shadow.camera.left = -105;
+  sunLight.shadow.camera.right = 105;
+  sunLight.shadow.camera.top = 105;
+  sunLight.shadow.camera.bottom = -105;
   sunLight.shadow.camera.near = 10;
-  sunLight.shadow.camera.far = 290;
+  sunLight.shadow.camera.far = 310;
   sunLight.shadow.bias = -0.0005;
   scene.add(sunLight);
 
-  const rimLight = new THREE.DirectionalLight(0x00e676, 0.26);
-  rimLight.position.set(-75, 42, -65);
-  scene.add(rimLight);
-
-  // Starfield Dome
-  const starPos = new Float32Array(500 * 3);
-  for (let i = 0; i < 500; i++) {
-    const r = 270 + Math.random() * 80;
+  // Night Starfield Dome (natural white/blue-white stars)
+  const starPos = new Float32Array(550 * 3);
+  for (let i = 0; i < 550; i++) {
+    const r = 360 + Math.random() * 90;
     const th = Math.random() * Math.PI * 2;
-    const ph = Math.random() * Math.PI * 0.45;
+    const ph = Math.random() * Math.PI * 0.44;
     starPos[i * 3] = r * Math.sin(ph) * Math.cos(th);
-    starPos[i * 3 + 1] = r * Math.cos(ph) + 20;
+    starPos[i * 3 + 1] = r * Math.cos(ph) + 25;
     starPos[i * 3 + 2] = r * Math.sin(ph) * Math.sin(th);
   }
   const starGeo = new THREE.BufferGeometry();
   starGeo.setAttribute("position", new THREE.BufferAttribute(starPos, 3));
-  const starMat = new THREE.PointsMaterial({ color: 0xd1fae5, size: 1.4, transparent: true, opacity: 0.0 });
+  const starMat = new THREE.PointsMaterial({ color: 0xf1f5f9, size: 1.5, transparent: true, opacity: 0.0 });
   scene.add(new THREE.Points(starGeo, starMat));
 
-  // Shared Materials
-  const matGround = new THREE.MeshStandardMaterial({ color: 0x080c0a, roughness: 0.94, metalness: 0.04 });
-  const matPark   = new THREE.MeshStandardMaterial({ color: 0x0d2618, roughness: 0.9 });
-  const matRoad   = new THREE.MeshStandardMaterial({ color: 0x131916, roughness: 0.86 });
-  const matCurb   = new THREE.MeshStandardMaterial({ color: 0x222c27, roughness: 0.8 });
-  const matWater  = new THREE.MeshStandardMaterial({ color: 0x062824, roughness: 0.12, metalness: 0.82, transparent: true, opacity: 0.88 });
-  const matSteel  = new THREE.MeshStandardMaterial({ color: 0x607068, roughness: 0.35, metalness: 0.78 });
-  const matDark   = new THREE.MeshStandardMaterial({ color: 0x141b18, roughness: 0.45, metalness: 0.6 });
-  const matGreenTrim = new THREE.MeshStandardMaterial({ color: 0x00e676, emissive: 0x00e676, emissiveIntensity: 0.95 });
-  const matSolar  = new THREE.MeshStandardMaterial({ color: 0x0b2942, emissive: 0x061a2b, emissiveIntensity: 0.25, roughness: 0.18, metalness: 0.85 });
-  const matCapRoof = new THREE.MeshStandardMaterial({ color: 0x0c1210, roughness: 0.5, metalness: 0.4 });
+  // Natural World Materials
+  const matTerrain  = new THREE.MeshStandardMaterial({ color: 0x486b43, roughness: 0.95, metalness: 0.02 });
+  const matCityPad  = new THREE.MeshStandardMaterial({ color: 0x6c757d, roughness: 0.9, metalness: 0.04 });
+  const matPark     = new THREE.MeshStandardMaterial({ color: 0x4f7a49, roughness: 0.88 });
+  const matRoad     = new THREE.MeshStandardMaterial({ color: 0x2b3036, roughness: 0.85, metalness: 0.05 });
+  const matSidewalk = new THREE.MeshStandardMaterial({ color: 0xadb5bd, roughness: 0.82 });
+  const matWater    = new THREE.MeshStandardMaterial({ color: 0x1e6091, roughness: 0.08, metalness: 0.72, transparent: true, opacity: 0.9 });
+  const matSteel    = new THREE.MeshStandardMaterial({ color: 0x8d99ae, roughness: 0.35, metalness: 0.75 });
+  const matConcrete = new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.78, metalness: 0.1 });
+  const matDarkRoof = new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.65, metalness: 0.25 });
+  const matSolar    = new THREE.MeshStandardMaterial({ color: 0x172a45, roughness: 0.18, metalness: 0.82 });
+  const matCrownLit = new THREE.MeshStandardMaterial({ color: 0xe2e8f0, emissive: 0xfff3d1, emissiveIntensity: 0.2, roughness: 0.3, metalness: 0.6 });
 
   const pickableMeshes = [];
   const floatingLabels = [];
@@ -421,27 +468,43 @@ window.__bootSmartGrid3D = function ({
     if (el) floatingLabels.push({ el, pos: new THREE.Vector3(x, y, z) });
   }
 
-  function makeBuildingBox(w, h, d, wallMat) {
-    const mats = [wallMat, wallMat, matCapRoof, matCapRoof, wallMat, wallMat];
+  function makeBuildingBox(w, h, d, wallMat, roofMat = matDarkRoof) {
+    const mats = [wallMat, wallMat, roofMat, roofMat, wallMat, wallMat];
     const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mats);
     m.castShadow = true;
     m.receiveShadow = true;
     return m;
   }
 
-  // Terrain, River & Road Grid
-  const ground = new THREE.Mesh(new THREE.BoxGeometry(280, 3, 260), matGround);
-  ground.position.y = -1.5;
-  ground.receiveShadow = true;
-  scene.add(ground);
+  // Expansive Natural Countryside Terrain (1600x1600 — no floating box edges!)
+  const terrain = new THREE.Mesh(new THREE.PlaneGeometry(1600, 1600), matTerrain);
+  terrain.rotation.x = -Math.PI / 2;
+  terrain.position.y = -0.05;
+  terrain.receiveShadow = true;
+  scene.add(terrain);
 
-  const river = new THREE.Mesh(new THREE.PlaneGeometry(11, 240), matWater);
+  // Urban Concrete Base Apron under downtown blocks
+  const urbanApron = new THREE.Mesh(new THREE.BoxGeometry(132, 0.12, 110), matCityPad);
+  urbanApron.position.set(10, 0.01, 0);
+  urbanApron.receiveShadow = true;
+  scene.add(urbanApron);
+
+  // Scenic Blue River Channel
+  const river = new THREE.Mesh(new THREE.PlaneGeometry(12, 1600), matWater);
   river.rotation.x = -Math.PI / 2;
-  river.position.set(-43, 0.06, 0);
+  river.position.set(-43, 0.04, 0);
   scene.add(river);
 
+  // Riverbank stone embankments
+  [-49.3, -36.7].forEach((rx) => {
+    const bank = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.3, 260), matConcrete);
+    bank.position.set(rx, 0.1, 0);
+    bank.receiveShadow = true;
+    scene.add(bank);
+  });
+
   function addRoad(x, z, w, d) {
-    const curb = new THREE.Mesh(new THREE.BoxGeometry(w + 2.2, 0.16, d + 2.2), matCurb);
+    const curb = new THREE.Mesh(new THREE.BoxGeometry(w + 2.4, 0.16, d + 2.4), matSidewalk);
     curb.position.set(x, 0.08, z);
     curb.receiveShadow = true;
     scene.add(curb);
@@ -452,11 +515,11 @@ window.__bootSmartGrid3D = function ({
     r.receiveShadow = true;
     scene.add(r);
 
-    const dashMat = new THREE.MeshBasicMaterial({ color: 0x3b4d44 });
+    const dashMat = new THREE.MeshBasicMaterial({ color: 0xe2e8f0 });
     const horiz = w > d;
     const len = horiz ? w : d;
     for (let p = -len / 2 + 4; p < len / 2 - 4; p += 7.5) {
-      const dash = new THREE.Mesh(new THREE.PlaneGeometry(horiz ? 3.2 : 0.25, horiz ? 0.25 : 3.2), dashMat);
+      const dash = new THREE.Mesh(new THREE.PlaneGeometry(horiz ? 3.2 : 0.22, horiz ? 0.22 : 3.2), dashMat);
       dash.rotation.x = -Math.PI / 2;
       dash.position.set(horiz ? x + p : x, 0.2, horiz ? z : z + p);
       scene.add(dash);
@@ -469,24 +532,27 @@ window.__bootSmartGrid3D = function ({
   addRoad(8, -42, 114, 6);
   addRoad(8, 42, 114, 6);
 
-  [-4.7, 4.7].forEach((zOff) => {
-    const bridgeTrim = new THREE.Mesh(new THREE.BoxGeometry(15, 0.9, 0.35), matGreenTrim);
-    bridgeTrim.position.set(-43, 0.65, zOff);
-    scene.add(bridgeTrim);
+  // Realistic Steel Highway Bridge Guardrails
+  [-4.8, 4.8].forEach((zOff) => {
+    const bridgeRail = new THREE.Mesh(new THREE.BoxGeometry(15, 0.85, 0.35), matSteel);
+    bridgeRail.position.set(-43, 0.65, zOff);
+    bridgeRail.castShadow = true;
+    scene.add(bridgeRail);
   });
 
-  // Streetlamps
+  // Warm Streetlamps (off by day, warm golden glow at night)
   function addLamp(x, z) {
     const g = new THREE.Group();
     const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.15, 5.2, 8), matSteel);
     pole.position.y = 2.6;
-    const bulbMat = new THREE.MeshBasicMaterial({ color: 0x64748b });
+    pole.castShadow = true;
+    const bulbMat = new THREE.MeshBasicMaterial({ color: 0x94a3b8 });
     const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.22, 8, 8), bulbMat);
-    bulb.position.set(0.6, 5.1, 0);
-    const haloMat = new THREE.MeshBasicMaterial({ color: 0xa7f3d0, transparent: true, opacity: 0, depthWrite: false });
-    const halo = new THREE.Mesh(new THREE.CircleGeometry(3.2, 16), haloMat);
+    bulb.position.set(0.55, 5.1, 0);
+    const haloMat = new THREE.MeshBasicMaterial({ color: 0xffdfa0, transparent: true, opacity: 0, depthWrite: false });
+    const halo = new THREE.Mesh(new THREE.CircleGeometry(3.4, 16), haloMat);
     halo.rotation.x = -Math.PI / 2;
-    halo.position.set(0.6, 0.21, 0);
+    halo.position.set(0.55, 0.21, 0);
     g.add(pole, bulb, halo);
     g.position.set(x, 0, z);
     streetLamps.push({ bulbMat, haloMat });
@@ -496,48 +562,47 @@ window.__bootSmartGrid3D = function ({
 
   // ── 1. MEDICAL CENTER COMPLEX (North-West [-26, 0, -23]) ──
   const hospG = new THREE.Group();
-  const hMain = makeBuildingBox(15, 23, 11, zoneMats.hospital);
+  const matWhiteRoof = new THREE.MeshStandardMaterial({ color: 0xcbd5e1, roughness: 0.7 });
+  const hMain = makeBuildingBox(15, 23, 11, zoneMats.hospital, matWhiteRoof);
   hMain.position.set(-26, 11.5, -23);
-  const hWing = makeBuildingBox(11, 13, 10, zoneMats.hospital);
+  const hWing = makeBuildingBox(11, 13, 10, zoneMats.hospital, matWhiteRoof);
   hWing.position.set(-18, 6.5, -16);
-  const hLobby = new THREE.Mesh(new THREE.BoxGeometry(7.5, 0.5, 4.5), matGreenTrim);
-  hLobby.position.set(-26, 3.8, -15.5);
-  const hPad = new THREE.Mesh(new THREE.CylinderGeometry(4.2, 4.2, 0.45, 24), matDark);
+  const hCanopy = new THREE.Mesh(new THREE.BoxGeometry(7.5, 0.5, 4.5), new THREE.MeshStandardMaterial({ color: 0x0284c7, roughness: 0.35 }));
+  hCanopy.position.set(-26, 3.8, -15.5);
+  const hPad = new THREE.Mesh(new THREE.CylinderGeometry(4.2, 4.2, 0.45, 24), matDarkRoof);
   hPad.position.set(-26, 23.25, -23);
-  const crossMat = new THREE.MeshStandardMaterial({ color: 0xff3b5c, emissive: 0xff3b5c, emissiveIntensity: 0.9 });
+  const crossMat = new THREE.MeshStandardMaterial({ color: 0xdc2626, emissive: 0xdc2626, emissiveIntensity: 0.35 });
   const c1 = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.35, 1.2), crossMat);
   c1.position.set(-26, 23.6, -23);
   const c2 = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.35, 4.2), crossMat);
   c2.position.set(-26, 23.6, -23);
-  const hBeacon = new THREE.Mesh(new THREE.SphereGeometry(0.4, 8, 8), new THREE.MeshBasicMaterial({ color: 0xff3b5c }));
+  const hBeacon = new THREE.Mesh(new THREE.SphereGeometry(0.38, 8, 8), new THREE.MeshBasicMaterial({ color: 0xef4444 }));
   hBeacon.position.set(-32.5, 23.8, -27.5);
   beacons.push(hBeacon);
-  hospG.add(hMain, hWing, hLobby, hPad, c1, c2, hBeacon);
+  hospG.add(hMain, hWing, hCanopy, hPad, c1, c2, hBeacon);
   tagZone(hospG, "hospital");
   scene.add(hospG);
   addPin("label-hospital", -26, 28, -23);
 
   // ── 2. COMMERCIAL & TECH SKYSCRAPER CORE (Center-North [5, 0, -24]) ──
   const comG = new THREE.Group();
-  // Tower 1: 36m Stepped Flagship Skyscraper
   const t1Base = makeBuildingBox(11.5, 30, 11.5, zoneMats.commercial);
   t1Base.position.set(5, 15, -27);
   const t1Top = makeBuildingBox(8.4, 7, 8.4, zoneMats.commercial);
   t1Top.position.set(5, 33.5, -27);
-  const t1Crown = new THREE.Mesh(new THREE.BoxGeometry(8.8, 0.45, 8.8), matGreenTrim);
+  const t1Crown = new THREE.Mesh(new THREE.BoxGeometry(8.7, 0.45, 8.7), matCrownLit);
   t1Crown.position.set(5, 37.2, -27);
   const t1Spire = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.32, 7.5, 8), matSteel);
   t1Spire.position.set(5, 41, -27);
-  // Tower 2: Twin Financial High-Rise
+
   const t2 = makeBuildingBox(9.5, 24, 9.5, zoneMats.commercial);
   t2.position.set(-4.5, 12, -18);
-  const t2Crown = new THREE.Mesh(new THREE.BoxGeometry(9.8, 0.35, 9.8), matGreenTrim);
+  const t2Crown = new THREE.Mesh(new THREE.BoxGeometry(9.7, 0.35, 9.7), matCrownLit);
   t2Crown.position.set(-4.5, 24.2, -18);
-  // Tower 3: Mid-Rise Tech Block
+
   const t3 = makeBuildingBox(9, 18, 9, zoneMats.commercial);
   t3.position.set(14.5, 9, -26);
-  // Tower 4: Hyperscale Data Center
-  const dc = makeBuildingBox(11, 9.5, 8.5, zoneMats.commercial);
+  const dc = makeBuildingBox(11, 9.5, 8.5, zoneMats.industry, matWhiteRoof);
   dc.position.set(13, 4.75, -15);
   comG.add(t1Base, t1Top, t1Crown, t1Spire, t2, t2Crown, t3, dc);
   tagZone(comG, "commercial");
@@ -546,31 +611,32 @@ window.__bootSmartGrid3D = function ({
 
   // ── 3. RESIDENTIAL DISTRICT (North-East [42, 0, -22]) ──
   const resG = new THREE.Group();
-  const resPark = new THREE.Mesh(new THREE.BoxGeometry(30, 0.22, 28), matPark);
+  const resPark = new THREE.Mesh(new THREE.BoxGeometry(32, 0.22, 29), matPark);
   resPark.position.set(42, 0.11, -22);
   resPark.receiveShadow = true;
   resG.add(resPark);
 
   [
-    { x: 32, z: -31, w: 8.5, h: 17, d: 8.5 },
-    { x: 43, z: -32, w: 9,   h: 21, d: 8.5 },
-    { x: 53, z: -29, w: 8,   h: 15, d: 8 },
-    { x: 54, z: -18, w: 8,   h: 13, d: 8 },
+    { x: 32, z: -31, w: 8.5, h: 17, d: 8.5, mat: zoneMats.residential },
+    { x: 43, z: -32, w: 9,   h: 21, d: 8.5, mat: zoneMats.residentialBrick },
+    { x: 53, z: -29, w: 8,   h: 15, d: 8,   mat: zoneMats.residential },
+    { x: 54, z: -18, w: 8,   h: 13, d: 8,   mat: zoneMats.residentialBrick },
   ].forEach((a) => {
-    const b = makeBuildingBox(a.w, a.h, a.d, zoneMats.residential);
+    const b = makeBuildingBox(a.w, a.h, a.d, a.mat);
     b.position.set(a.x, a.h / 2, a.z);
     resG.add(b);
   });
 
-  const matTownRoof = new THREE.MeshStandardMaterial({ color: 0x1f2924, roughness: 0.7 });
+  const matTerraRoof = new THREE.MeshStandardMaterial({ color: 0x7f4f3e, roughness: 0.8 });
   for (let tx = 31; tx <= 46; tx += 7.2) {
     for (let tz = -19; tz <= -12; tz += 7) {
       const h = 5.6 + ((tx + tz) % 2) * 1.4;
-      const th = makeBuildingBox(5.2, h, 5.2, zoneMats.residential);
+      const th = makeBuildingBox(5.2, h, 5.2, (tx + tz) % 2 ? zoneMats.residential : zoneMats.residentialBrick);
       th.position.set(tx, h / 2, tz);
-      const rf = new THREE.Mesh(new THREE.ConeGeometry(4.1, 2.0, 4), matTownRoof);
+      const rf = new THREE.Mesh(new THREE.ConeGeometry(4.1, 2.1, 4), matTerraRoof);
       rf.rotation.y = Math.PI / 4;
-      rf.position.set(tx, h + 1.0, tz);
+      rf.position.set(tx, h + 1.05, tz);
+      rf.castShadow = true;
       resG.add(th, rf);
     }
   }
@@ -582,30 +648,32 @@ window.__bootSmartGrid3D = function ({
   const indG = new THREE.Group();
   const fac1 = makeBuildingBox(16, 9.5, 18, zoneMats.industry);
   fac1.position.set(-28, 4.75, 21);
-  const fac2 = makeBuildingBox(13, 7, 12, zoneMats.industry);
+  const fac2 = makeBuildingBox(13, 7, 12, zoneMats.industry, matWhiteRoof);
   fac2.position.set(-22, 3.5, 34);
   indG.add(fac1, fac2);
 
   for (let sz = 14; sz <= 28; sz += 4.5) {
-    const saw = new THREE.Mesh(new THREE.ConeGeometry(2.6, 2.2, 4), matDark);
+    const saw = new THREE.Mesh(new THREE.ConeGeometry(2.6, 2.2, 4), matDarkRoof);
     saw.rotation.y = Math.PI / 4;
     saw.scale.set(2.9, 1, 0.8);
     saw.position.set(-28, 10.6, sz);
     indG.add(saw);
   }
 
-  [0x00e676, 0xf59e0b, 0x334155, 0x10b981].forEach((col, i) => {
-    const cont = new THREE.Mesh(new THREE.BoxGeometry(4.6, 2.2, 2.2), new THREE.MeshStandardMaterial({ color: col, roughness: 0.45, metalness: 0.4 }));
+  [0x1d4ed8, 0xb45309, 0x991b1b, 0x0f766e].forEach((col, i) => {
+    const cont = new THREE.Mesh(new THREE.BoxGeometry(4.6, 2.2, 2.2), new THREE.MeshStandardMaterial({ color: col, roughness: 0.55, metalness: 0.3 }));
     cont.position.set(-34, 1.1 + (i % 2) * 2.2, 32 + Math.floor(i / 2) * 2.6);
     cont.castShadow = true;
     indG.add(cont);
   });
 
   [-33, -28.5, -24].forEach((sx) => {
-    const st = new THREE.Mesh(new THREE.CylinderGeometry(1.0, 1.5, 16.5, 16), matSteel);
+    const st = new THREE.Mesh(new THREE.CylinderGeometry(1.0, 1.5, 16.5, 16), matConcrete);
     st.position.set(sx, 8.25, 11.5);
     st.castShadow = true;
-    indG.add(st);
+    const band = new THREE.Mesh(new THREE.CylinderGeometry(1.04, 1.08, 1.4, 16), new THREE.MeshStandardMaterial({ color: 0xb91c1c, roughness: 0.6 }));
+    band.position.set(sx, 15.2, 11.5);
+    indG.add(st, band);
   });
   tagZone(indG, "industry");
   scene.add(indG);
@@ -613,7 +681,7 @@ window.__bootSmartGrid3D = function ({
 
   // ── 5. UNIVERSITY CAMPUS (South-East [40, 0, 22]) ──
   const schG = new THREE.Group();
-  const quad = new THREE.Mesh(new THREE.BoxGeometry(30, 0.2, 28), matPark);
+  const quad = new THREE.Mesh(new THREE.BoxGeometry(32, 0.2, 29), matPark);
   quad.position.set(40, 0.1, 23);
   quad.receiveShadow = true;
   const hall = makeBuildingBox(21, 8.5, 7.5, zoneMats.school);
@@ -624,7 +692,7 @@ window.__bootSmartGrid3D = function ({
   wR.position.set(49, 3.75, 25);
   const tower = makeBuildingBox(4.4, 17, 4.4, zoneMats.school);
   tower.position.set(40, 8.5, 14.5);
-  const towerCap = new THREE.Mesh(new THREE.ConeGeometry(3.5, 4.2, 4), matDark);
+  const towerCap = new THREE.Mesh(new THREE.ConeGeometry(3.5, 4.2, 4), matDarkRoof);
   towerCap.rotation.y = Math.PI / 4;
   towerCap.position.set(40, 19.1, 14.5);
   for (let spx = 32; spx <= 48; spx += 5) {
@@ -640,62 +708,65 @@ window.__bootSmartGrid3D = function ({
 
   // ── 6. EV SUPERCHARGER & TRANSIT PLAZA (Center-South [5, 0, 22]) ──
   const evG = new THREE.Group();
-  const evPad = new THREE.Mesh(new THREE.BoxGeometry(23, 0.25, 18), matCurb);
+  const evPad = new THREE.Mesh(new THREE.BoxGeometry(23, 0.25, 18), matSidewalk);
   evPad.position.set(5, 0.12, 22);
   evPad.receiveShadow = true;
-  const canopy = new THREE.Mesh(new THREE.BoxGeometry(18.5, 0.5, 9.2), matSolar);
-  canopy.position.set(5, 5.5, 20.5);
-  canopy.castShadow = true;
-  const canopyEdge = new THREE.Mesh(new THREE.BoxGeometry(18.8, 0.22, 9.5), zoneMats.ev_hub);
-  canopyEdge.position.set(5, 5.8, 20.5);
+  const canopyFrame = new THREE.Mesh(new THREE.BoxGeometry(18.8, 0.45, 9.5), matWhiteRoof);
+  canopyFrame.position.set(5, 5.45, 20.5);
+  canopyFrame.castShadow = true;
+  const canopySolar = new THREE.Mesh(new THREE.BoxGeometry(18.2, 0.15, 8.9), matSolar);
+  canopySolar.position.set(5, 5.72, 20.5);
   [-2.5, 5, 12.5].forEach((px) => {
     const col = new THREE.Mesh(new THREE.CylinderGeometry(0.26, 0.26, 5.4, 10), matSteel);
     col.position.set(px, 2.7, 20.5);
     evG.add(col);
   });
   for (let sx = -2.5; sx <= 12.5; sx += 3) {
-    const ped = new THREE.Mesh(new THREE.BoxGeometry(0.75, 2.2, 0.5), matDark);
+    const ped = new THREE.Mesh(new THREE.BoxGeometry(0.75, 2.2, 0.5), matWhiteRoof);
     ped.position.set(sx, 1.1, 20.5);
-    const bar = new THREE.Mesh(new THREE.BoxGeometry(0.5, 1.45, 0.56), zoneMats.ev_hub);
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(0.45, 1.3, 0.54), zoneMats.ev_hub);
     bar.position.set(sx, 1.2, 20.5);
     evG.add(ped, bar);
   }
-  const lounge = makeBuildingBox(10, 4.5, 4.8, zoneMats.commercial);
+  const lounge = makeBuildingBox(10, 4.5, 4.8, zoneMats.hospital, matWhiteRoof);
   lounge.position.set(5, 2.25, 28.5);
-  evG.add(evPad, canopy, canopyEdge, lounge);
+  evG.add(evPad, canopyFrame, canopySolar, lounge);
   tagZone(evG, "ev_hub");
   scene.add(evG);
   addPin("label-ev_hub", 5, 10, 21);
 
   // ── 7. UTILITY BESS MEGAPACK SUBSTATION & PYLONS (West [-60, 0, -2]) ──
   const bessG = new THREE.Group();
-  const bessPad = new THREE.Mesh(new THREE.BoxGeometry(24, 0.3, 26), matCurb);
-  bessPad.position.set(-60, 0.15, -2);
-  const matPack = new THREE.MeshStandardMaterial({ color: 0xdbe5e0, roughness: 0.35, metalness: 0.45 });
+  const bessPad = new THREE.Mesh(new THREE.BoxGeometry(24, 0.28, 26), matSidewalk);
+  bessPad.position.set(-60, 0.14, -2);
+  bessPad.receiveShadow = true;
+  const matPack = new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.4, metalness: 0.3 });
   for (let bx = -67; bx <= -53; bx += 6.5) {
     for (let bz = -10; bz <= 6; bz += 4.2) {
       const pk = new THREE.Mesh(new THREE.BoxGeometry(4.5, 3.1, 2.1), matPack);
       pk.position.set(bx, 1.7, bz);
       pk.castShadow = true;
-      const led = new THREE.Mesh(new THREE.BoxGeometry(3.9, 0.42, 2.18), zoneMats.battery);
+      pk.receiveShadow = true;
+      const led = new THREE.Mesh(new THREE.BoxGeometry(3.8, 0.32, 2.16), zoneMats.battery);
       led.position.set(bx, 2.45, bz);
       bessG.add(pk, led);
     }
   }
-  // High-Voltage Transmission Pylons across river
   [-51, -35].forEach((px) => {
     const pylon = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 1.1, 15, 4), matSteel);
     pylon.position.set(px, 7.5, -8);
+    pylon.castShadow = true;
     const arm = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.3, 6.5), matSteel);
     arm.position.set(px, 13.5, -8);
     bessG.add(pylon, arm);
   });
+  bessG.add(bessPad);
   scene.add(bessG);
   addPin("label-battery", -60, 11, -2);
 
   // ── 8. CLEAN RENEWABLE FARM: 5 WIND TURBINES + 16 SOLAR ARRAYS ([-68, 0, -34]) ──
   const renG = new THREE.Group();
-  const matWhite = new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.28, metalness: 0.3 });
+  const matWhite = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.32, metalness: 0.2 });
   function addTurbine(x, z) {
     const g = new THREE.Group();
     const tw = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.95, 22, 14), matWhite);
@@ -711,6 +782,7 @@ window.__bootSmartGrid3D = function ({
       piv.rotation.z = (b * Math.PI * 2) / 3;
       const blade = new THREE.Mesh(new THREE.BoxGeometry(0.44, 9.2, 0.15), matWhite);
       blade.position.y = 4.6;
+      blade.castShadow = true;
       piv.add(blade);
       rotor.add(piv);
     }
@@ -725,6 +797,7 @@ window.__bootSmartGrid3D = function ({
       const pv = new THREE.Mesh(new THREE.BoxGeometry(4.6, 0.18, 2.2), matSolar);
       pv.rotation.x = 0.35;
       pv.position.set(sx, 1.2, sz);
+      pv.castShadow = true;
       renG.add(pv);
     }
   }
@@ -736,11 +809,12 @@ window.__bootSmartGrid3D = function ({
     const g = new THREE.Group();
     const hall = makeBuildingBox(11, 8, 10, zoneMats.industry);
     hall.position.y = 4;
-    const cool = new THREE.Mesh(new THREE.CylinderGeometry(3.3, 4.9, 14.5, 20), matSteel);
+    const cool = new THREE.Mesh(new THREE.CylinderGeometry(3.3, 4.9, 14.5, 20), matConcrete);
     cool.position.set(-5.5, 7.25, -4);
     cool.castShadow = true;
-    const ringMat = new THREE.MeshBasicMaterial({ color: 0x00e676 });
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(3.35, 0.22, 8, 24), ringMat);
+    cool.receiveShadow = true;
+    const ringMat = new THREE.MeshBasicMaterial({ color: 0x22c55e });
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(3.35, 0.18, 8, 24), ringMat);
     ring.rotation.x = Math.PI / 2;
     ring.position.set(-5.5, 14.55, -4);
     g.add(hall, cool, ring);
@@ -752,19 +826,24 @@ window.__bootSmartGrid3D = function ({
   const p1Obj = addPlant(-65, 24, "label-plant1");
   const p2Obj = addPlant(-56, 42, "label-plant2");
 
-  // Trees & Vehicles
-  const matTrunk = new THREE.MeshStandardMaterial({ color: 0x3b2314, roughness: 0.9 });
-  const matCrown = new THREE.MeshStandardMaterial({ color: 0x166534, roughness: 0.78 });
+  // Varied Natural Trees & Realistic Vehicles
+  const matTrunk = new THREE.MeshStandardMaterial({ color: 0x5c4033, roughness: 0.9 });
+  const leafShades = [
+    new THREE.MeshStandardMaterial({ color: 0x2d6a4f, roughness: 0.82 }),
+    new THREE.MeshStandardMaterial({ color: 0x40916c, roughness: 0.82 }),
+    new THREE.MeshStandardMaterial({ color: 0x386641, roughness: 0.85 }),
+  ];
   [
     [-36, -34], [-18, -35], [26, -34], [58, -34], [58, -10],
     [56, 14], [56, 34], [26, 35], [-18, 36], [39, -22], [45, -24],
+    [36, 23], [44, 25], [-55, -20], [-72, 8],
   ].forEach(([tx, tz], i) => {
-    const s = 0.9 + (i % 3) * 0.16;
+    const s = 0.9 + (i % 3) * 0.18;
     const tg = new THREE.Group();
     const tr = new THREE.Mesh(new THREE.CylinderGeometry(0.25 * s, 0.38 * s, 2.3 * s, 7), matTrunk);
     tr.position.y = 1.15 * s;
-    const cr = new THREE.Mesh(new THREE.ConeGeometry(1.75 * s, 4.2 * s, 8), matCrown);
-    cr.position.y = 3.6 * s;
+    const cr = new THREE.Mesh(new THREE.ConeGeometry(1.8 * s, 4.3 * s, 8), leafShades[i % 3]);
+    cr.position.y = 3.65 * s;
     cr.castShadow = true;
     tg.add(tr, cr);
     tg.position.set(tx, 0, tz);
@@ -773,38 +852,41 @@ window.__bootSmartGrid3D = function ({
 
   function addCar(start, end, speed, hex) {
     const g = new THREE.Group();
-    const b = new THREE.Mesh(new THREE.BoxGeometry(2.7, 0.9, 1.4), new THREE.MeshStandardMaterial({ color: hex, roughness: 0.25, metalness: 0.65 }));
-    b.position.y = 0.62;
-    const hl = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.24, 1.1), new THREE.MeshBasicMaterial({ color: 0xd1fae5 }));
-    hl.position.set(1.38, 0.65, 0);
-    g.add(b, hl);
+    const b = new THREE.Mesh(new THREE.BoxGeometry(2.7, 0.85, 1.4), new THREE.MeshStandardMaterial({ color: hex, roughness: 0.3, metalness: 0.6 }));
+    b.position.y = 0.6;
+    b.castShadow = true;
+    const cab = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.6, 1.25), new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.2, metalness: 0.7 }));
+    cab.position.set(-0.1, 1.2, 0);
+    const hl = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.22, 1.1), new THREE.MeshBasicMaterial({ color: 0xfffbeb }));
+    hl.position.set(1.38, 0.62, 0);
+    g.add(b, cab, hl);
     const dir = new THREE.Vector3().subVectors(end, start);
     g.rotation.y = Math.atan2(-dir.z, dir.x);
     scene.add(g);
     cars.push({ mesh: g, start, end, speed, progress: Math.random() });
   }
-  addCar(new THREE.Vector3(-54, 0.18, 1.8), new THREE.Vector3(64, 0.18, 1.8), 13, 0x00e676);
-  addCar(new THREE.Vector3(64, 0.18, -1.8), new THREE.Vector3(-54, 0.18, -1.8), 11, 0xf8fafc);
-  addCar(new THREE.Vector3(-10.2, 0.18, -52), new THREE.Vector3(-10.2, 0.18, 52), 10, 0x10b981);
-  addCar(new THREE.Vector3(23.8, 0.18, 52), new THREE.Vector3(23.8, 0.18, -52), 11.5, 0xe2e8f0);
+  addCar(new THREE.Vector3(-54, 0.18, 1.8), new THREE.Vector3(64, 0.18, 1.8), 13, 0xe2e8f0);
+  addCar(new THREE.Vector3(64, 0.18, -1.8), new THREE.Vector3(-54, 0.18, -1.8), 11, 0xdc2626);
+  addCar(new THREE.Vector3(-10.2, 0.18, -52), new THREE.Vector3(-10.2, 0.18, 52), 10, 0x2563eb);
+  addCar(new THREE.Vector3(23.8, 0.18, 52), new THREE.Vector3(23.8, 0.18, -52), 11.5, 0x475569);
 
-  // Energy Flow Conduits (Bold Electric Green!)
+  // Subtle Power Conduits
   function addConduit(sVec, eVec, hex, key) {
-    const mid = new THREE.Vector3((sVec.x + eVec.x) * 0.5, 1.5, (sVec.z + eVec.z) * 0.5);
+    const mid = new THREE.Vector3((sVec.x + eVec.x) * 0.5, 0.9, (sVec.z + eVec.z) * 0.5);
     const curve = new THREE.QuadraticBezierCurve3(
-      new THREE.Vector3(sVec.x, 0.65, sVec.z),
+      new THREE.Vector3(sVec.x, 0.35, sVec.z),
       mid,
-      new THREE.Vector3(eVec.x, 0.65, eVec.z)
+      new THREE.Vector3(eVec.x, 0.35, eVec.z)
     );
-    const lineMat = new THREE.LineBasicMaterial({ color: hex, transparent: true, opacity: 0.45 });
+    const lineMat = new THREE.LineBasicMaterial({ color: hex, transparent: true, opacity: 0.28 });
     const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(curve.getPoints(28)), lineMat);
     scene.add(line);
 
-    const pCount = 9;
+    const pCount = 7;
     const positions = new Float32Array(pCount * 3);
     const pGeo = new THREE.BufferGeometry();
     pGeo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-    const pMat = new THREE.PointsMaterial({ color: hex, size: 0.9, transparent: true, opacity: 0.95 });
+    const pMat = new THREE.PointsMaterial({ color: hex, size: 0.75, transparent: true, opacity: 0.8 });
     const pts = new THREE.Points(pGeo, pMat);
     scene.add(pts);
 
@@ -812,15 +894,15 @@ window.__bootSmartGrid3D = function ({
   }
 
   const hubVec = new THREE.Vector3(-60, 0, -2);
-  addConduit(new THREE.Vector3(-66, 0, -34), hubVec, 0x00e676, "gen_solar_wind");
+  addConduit(new THREE.Vector3(-66, 0, -34), hubVec, 0x38bdf8, "gen_solar_wind");
   addConduit(p1Obj.pos, hubVec, 0xf59e0b, "gen_plant1");
   addConduit(p2Obj.pos, hubVec, 0xf59e0b, "gen_plant2");
-  addConduit(hubVec, new THREE.Vector3(-26, 0, -23), 0x00e676, "zone_hospital");
-  addConduit(hubVec, new THREE.Vector3(-28, 0, 21),  0x00e676, "zone_industry");
-  addConduit(hubVec, new THREE.Vector3(40, 0, 18),   0x00e676, "zone_school");
-  addConduit(hubVec, new THREE.Vector3(5, 0, -27),   0x00e676, "zone_commercial");
-  addConduit(hubVec, new THREE.Vector3(43, 0, -26),  0x00e676, "zone_residential");
-  addConduit(hubVec, new THREE.Vector3(5, 0, 21),    0x00e676, "zone_ev_hub");
+  addConduit(hubVec, new THREE.Vector3(-26, 0, -23), 0x38bdf8, "zone_hospital");
+  addConduit(hubVec, new THREE.Vector3(-28, 0, 21),  0x38bdf8, "zone_industry");
+  addConduit(hubVec, new THREE.Vector3(40, 0, 18),   0x38bdf8, "zone_school");
+  addConduit(hubVec, new THREE.Vector3(5, 0, -27),   0x38bdf8, "zone_commercial");
+  addConduit(hubVec, new THREE.Vector3(43, 0, -26),  0x38bdf8, "zone_residential");
+  addConduit(hubVec, new THREE.Vector3(5, 0, 21),    0x38bdf8, "zone_ev_hub");
 
   // Raycast Click-to-Inspect
   const raycaster = new THREE.Raycaster();
@@ -848,12 +930,19 @@ window.__bootSmartGrid3D = function ({
   }
   window.addEventListener("resize", onResize);
 
-  // Sky Colors
-  const SKY_NIGHT = new THREE.Color(0x030605);
-  const SKY_DAWN  = new THREE.Color(0x162922);
-  const SKY_DAY   = new THREE.Color(0x193833);
-  const SKY_DUSK  = new THREE.Color(0x12211d);
-  const tmpSky = new THREE.Color();
+  // Natural Atmospheric Palette Across 24 Hours
+  const FOG_NIGHT  = new THREE.Color(0x070c18);
+  const FOG_DAWN   = new THREE.Color(0xd98a6c);
+  const FOG_DAY    = new THREE.Color(0xb8d8f2);
+  const FOG_SUNSET = new THREE.Color(0xc97b5d);
+
+  const SUN_NIGHT  = new THREE.Color(0x64748b);
+  const SUN_GOLDEN = new THREE.Color(0xff9e5e);
+  const SUN_NOON   = new THREE.Color(0xfff8eb);
+
+  const tmpFog = new THREE.Color();
+  const tmpSunCol = new THREE.Color();
+  const sunDir = new THREE.Vector3();
   const projV = new THREE.Vector3();
 
   function renderLoop() {
@@ -866,31 +955,66 @@ window.__bootSmartGrid3D = function ({
       if (camera.position.distanceTo(camLerpGoal.pos) < 0.4) camLerpGoal.active = false;
     }
     controls.autoRotate = autoOrbit;
-    controls.autoRotateSpeed = 0.7;
+    controls.autoRotateSpeed = 0.65;
     controls.update();
 
-    // Sun & Sky
-    const sunAng = ((currentHour - 6) / 12) * Math.PI;
-    sunLight.position.set(Math.cos(sunAng) * -95, Math.max(6, Math.sin(sunAng) * 95), Math.cos(sunAng) * 38);
-    const isNight = currentHour < 6.2 || currentHour >= 19.0;
-    sunLight.intensity += ((isNight ? 0.08 : 1.45) - sunLight.intensity) * 0.1;
-    hemiLight.intensity += ((isNight ? 0.28 : 0.65) - hemiLight.intensity) * 0.1;
+    // Physically Natural Sun Arc & Color Temperature
+    const dayPhase = ((currentHour - 6.0) / 12.0) * Math.PI; // 0 at 06:00, PI/2 at 12:00, PI at 18:00
+    const sunElev = Math.sin(dayPhase); // > 0 during 06:00 - 18:00
+    const azimuth = -Math.cos(dayPhase);
 
-    if (currentHour < 5.5 || currentHour >= 19.5) tmpSky.copy(SKY_NIGHT);
-    else if (currentHour < 7.2) tmpSky.lerpColors(SKY_NIGHT, SKY_DAWN, (currentHour - 5.5) / 1.7);
-    else if (currentHour < 9.0) tmpSky.lerpColors(SKY_DAWN, SKY_DAY, (currentHour - 7.2) / 1.8);
-    else if (currentHour < 17.0) tmpSky.copy(SKY_DAY);
-    else if (currentHour < 18.4) tmpSky.lerpColors(SKY_DAY, SKY_DUSK, (currentHour - 17.0) / 1.4);
-    else tmpSky.lerpColors(SKY_DUSK, SKY_NIGHT, (currentHour - 18.4) / 1.1);
+    sunDir.set(azimuth * 0.88, Math.max(-0.25, sunElev), 0.38).normalize();
+    sunLight.position.copy(sunDir).multiplyScalar(120);
+    if (sunLight.position.y < 8) sunLight.position.y = 8; // Moon/twilight grazing shadow angle
 
-    scene.background.lerp(tmpSky, 0.12);
-    scene.fog.color.copy(scene.background);
-    starMat.opacity += ((isNight ? 0.85 : 0.0) - starMat.opacity) * 0.08;
+    if (sky) {
+      sky.material.uniforms.sunPosition.value.copy(sunDir);
+      sky.visible = sunElev > -0.14;
+    }
 
+    const isNight = sunElev <= -0.06;
+    const isGolden = sunElev > -0.06 && sunElev < 0.32;
+
+    if (isNight) {
+      tmpFog.copy(FOG_NIGHT);
+      tmpSunCol.copy(SUN_NIGHT);
+      scene.background.lerp(FOG_NIGHT, 0.12);
+    } else if (isGolden) {
+      const t = (sunElev + 0.06) / 0.38;
+      tmpFog.lerpColors(currentHour < 12 ? FOG_DAWN : FOG_SUNSET, FOG_DAY, t);
+      tmpSunCol.lerpColors(SUN_GOLDEN, SUN_NOON, t);
+      scene.background.lerp(tmpFog, 0.12);
+    } else {
+      tmpFog.copy(FOG_DAY);
+      tmpSunCol.copy(SUN_NOON);
+      scene.background.lerp(FOG_DAY, 0.12);
+    }
+
+    sunLight.color.lerp(tmpSunCol, 0.12);
+    const targetSunInt = isNight ? 0.14 : isGolden ? 1.35 : 2.25;
+    sunLight.intensity += (targetSunInt - sunLight.intensity) * 0.1;
+
+    hemiLight.color.setHex(isNight ? 0x334155 : isGolden ? 0xfed7aa : 0x9bd3ff);
+    hemiLight.groundColor.setHex(isNight ? 0x0f172a : 0x4f6349);
+    hemiLight.intensity += ((isNight ? 0.32 : 0.78) - hemiLight.intensity) * 0.1;
+
+    if ("environmentIntensity" in scene) {
+      scene.environmentIntensity = isNight ? 0.12 : isGolden ? 0.32 : 0.5;
+    }
+    renderer.toneMappingExposure = isNight ? 0.95 : 1.02;
+    bloomPass.strength = isNight ? 0.32 : 0.12;
+
+    scene.fog.color.lerp(tmpFog, 0.12);
+    starMat.opacity += ((sunElev < -0.08 ? 0.9 : 0.0) - starMat.opacity) * 0.08;
+
+    const lightsOn = sunElev < 0.12;
+    matCrownLit.emissiveIntensity = lightsOn ? 0.85 : 0.0;
     streetLamps.forEach((sl) => {
-      sl.bulbMat.color.setHex(isNight ? 0xa7f3d0 : 0x475569);
-      sl.haloMat.opacity = isNight ? 0.2 : 0.0;
+      sl.bulbMat.color.setHex(lightsOn ? 0xffe4a0 : 0x94a3b8);
+      sl.haloMat.opacity = lightsOn ? 0.24 : 0.0;
     });
+
+    if (latestGridState) updateBuildingWindowsForSun(latestGridState, sunElev);
 
     // Wind Rotors & Beacons
     const renOn = latestGridState?.plants_state?.solar_wind?.active ?? true;
@@ -898,13 +1022,13 @@ window.__bootSmartGrid3D = function ({
     const pulse = 0.5 + 0.5 * Math.sin(now * 5);
     beacons.forEach((b) => b.scale.setScalar(0.85 + pulse * 0.45));
 
-    // Energy Particles
+    // Subtle Energy Particles
     energyPaths.forEach((ep) => {
-      ep.lineMat.opacity = ep.isActive ? 0.5 : 0.08;
-      ep.pMat.opacity = ep.isActive ? 0.95 : 0.0;
+      ep.lineMat.opacity = ep.isActive ? (lightsOn ? 0.42 : 0.22) : 0.05;
+      ep.pMat.opacity = ep.isActive ? (lightsOn ? 0.9 : 0.65) : 0.0;
       if (!ep.isActive) return;
       for (let i = 0; i < ep.pCount; i++) {
-        const pt = ep.curve.getPoint((now * 0.36 + i / ep.pCount) % 1.0);
+        const pt = ep.curve.getPoint((now * 0.34 + i / ep.pCount) % 1.0);
         ep.positions[i * 3] = pt.x;
         ep.positions[i * 3 + 1] = pt.y;
         ep.positions[i * 3 + 2] = pt.z;
@@ -918,7 +1042,7 @@ window.__bootSmartGrid3D = function ({
       c.mesh.position.lerpVectors(c.start, c.end, c.progress);
     });
 
-    // Project 3D Floating Pins WITH Smart HUD Occlusion Culling!
+    // Project 3D Pins WITH HUD Occlusion + 2D Anti-Overlap Separation!
     if (pinsVisible) {
       const { w, h } = getSize();
       const simEl = document.getElementById("sim-page");
@@ -926,53 +1050,93 @@ window.__bootSmartGrid3D = function ({
       const inspOpen = document.getElementById("zone-inspector")?.classList.contains("open");
       const copilotOpen = document.getElementById("copilot-drawer")?.classList.contains("open");
 
+      const visiblePins = [];
       floatingLabels.forEach((lbl) => {
         projV.copy(lbl.pos).project(camera);
         const x = (projV.x * 0.5 + 0.5) * w;
         const y = (projV.y * -0.5 + 0.5) * h;
-        lbl.el.style.left = `${x}px`;
-        lbl.el.style.top = `${y}px`;
 
-        let occluded = projV.z >= 1.0 || x < 40 || x > w - 40 || y < 82 || y > h - 80;
+        let occluded = projV.z >= 1.0 || x < 45 || x > w - 45 || y < 82 || y > h - 80;
         if (!occluded && dockOpen && x < 355 && y > 10 && y < h - 70) occluded = true;
         if (!occluded && inspOpen && x > w - 330 && y < 340) occluded = true;
         if (!occluded && copilotOpen && x > w - 405) occluded = true;
 
-        lbl.el.style.opacity = occluded ? "0" : "1";
-        lbl.el.style.pointerEvents = occluded ? "none" : "auto";
+        if (occluded) {
+          lbl.el.style.opacity = "0";
+          lbl.el.style.pointerEvents = "none";
+        } else {
+          visiblePins.push({ lbl, x, y });
+        }
+      });
+
+      // Push apart overlapping pins in screen space
+      visiblePins.sort((a, b) => a.y - b.y);
+      for (let i = 0; i < visiblePins.length; i++) {
+        for (let j = i + 1; j < visiblePins.length; j++) {
+          const dx = Math.abs(visiblePins[i].x - visiblePins[j].x);
+          const dy = visiblePins[j].y - visiblePins[i].y;
+          if (dx < 155 && dy < 29) {
+            const shift = (29 - dy) * 0.5;
+            visiblePins[i].y -= shift;
+            visiblePins[j].y += shift;
+          }
+        }
+      }
+
+      visiblePins.forEach(({ lbl, x, y }) => {
+        lbl.el.style.left = `${x}px`;
+        lbl.el.style.top = `${y}px`;
+        lbl.el.style.opacity = "1";
+        lbl.el.style.pointerEvents = "auto";
       });
     }
 
     composer.render();
   }
 
-  threeCtx = { zoneMats, energyPaths, p1Obj, p2Obj, camLerpGoal, onResize };
+  function updateBuildingWindowsForSun(state, sunElev) {
+    // Windows off in bright daylight (0.0), warming up smoothly at dusk/night (0.9)
+    const nightGlow = sunElev > 0.2 ? 0.0 : sunElev < -0.05 ? 0.92 : ((0.2 - sunElev) / 0.25) * 0.92;
+    ZONES.forEach((z) => {
+      const mat = zoneMats[z];
+      const d = state.demand?.[z] ?? 0;
+      const s = state.supplied?.[z] ?? 0;
+      const shed = d > 1 && s < d - 0.5;
+      if (!mat) return;
+      if (d > 1 && s < d * 0.15) {
+        // Blackout: interior & stall lights go completely off
+        mat.emissive.setHex(0x000000);
+        mat.emissiveIntensity = 0.0;
+      } else if (shed) {
+        // Partial shedding (brownout): dim naturally in proportion to remaining supply
+        const ratio = Math.max(0.0, Math.min(1.0, s / Math.max(1.0, d)));
+        mat.emissive.setHex(z === "ev_hub" ? 0x0ea5e9 : 0xffffff);
+        mat.emissiveIntensity = (z === "ev_hub" ? (nightGlow * 0.6 + 0.25) : nightGlow) * ratio * 0.55;
+      } else {
+        mat.emissive.setHex(z === "ev_hub" ? 0x0ea5e9 : 0xffffff);
+        mat.emissiveIntensity = z === "ev_hub" ? (nightGlow * 0.6 + 0.25) : nightGlow;
+      }
+      if (z === "residential" && zoneMats.residentialBrick) {
+        zoneMats.residentialBrick.emissive.copy(mat.emissive);
+        zoneMats.residentialBrick.emissiveIntensity = mat.emissiveIntensity;
+      }
+    });
+  }
+
+  threeCtx = { zoneMats, energyPaths, p1Obj, p2Obj, camLerpGoal, onResize, updateBuildingWindowsForSun };
   if (latestGridState) sync3DWithState(latestGridState);
   renderLoop();
 };
 
 function sync3DWithState(state) {
   if (!threeCtx) return;
-  const isNight = currentHour < 7.0 || currentHour >= 17.8;
-  const { zoneMats, energyPaths, p1Obj, p2Obj } = threeCtx;
+  const { energyPaths, p1Obj, p2Obj } = threeCtx;
 
   ZONES.forEach((z) => {
-    const mat = zoneMats[z];
     const d = state.demand?.[z] ?? 0;
     const s = state.supplied?.[z] ?? 0;
     const shed = d > 1 && s < d - 0.5;
     document.getElementById(`label-${z}`)?.classList.toggle("shedding", shed);
-    if (!mat) return;
-    if (d > 1 && s < d * 0.15) {
-      mat.emissive.setHex(0xff3b5c);
-      mat.emissiveIntensity = 0.25;
-    } else if (shed) {
-      mat.emissive.setHex(0xf59e0b);
-      mat.emissiveIntensity = 0.85;
-    } else {
-      mat.emissive.setHex(z === "ev_hub" ? 0x00e676 : 0xffffff);
-      mat.emissiveIntensity = isNight ? 0.95 : 0.35;
-    }
   });
 
   const ps = state.plants_state || {};
@@ -984,14 +1148,14 @@ function sync3DWithState(state) {
       const z = ep.key.replace("zone_", "");
       const shed = (state.demand?.[z] ?? 0) > 1 && (state.supplied?.[z] ?? 0) < (state.demand?.[z] ?? 0) - 0.5;
       ep.isActive = (state.supplied?.[z] ?? 0) > 1;
-      const col = shed ? 0xff3b5c : ep.baseColor;
+      const col = shed ? 0xef4444 : ep.baseColor;
       ep.lineMat.color.setHex(col);
       ep.pMat.color.setHex(col);
     }
   });
 
-  p1Obj.ringMat.color.setHex(ps.plant1?.active ?? true ? 0x00e676 : 0xff3b5c);
-  p2Obj.ringMat.color.setHex(ps.plant2?.active ?? true ? 0x00e676 : 0xff3b5c);
+  p1Obj.ringMat.color.setHex(ps.plant1?.active ?? true ? 0x22c55e : 0xef4444);
+  p2Obj.ringMat.color.setHex(ps.plant2?.active ?? true ? 0x22c55e : 0xef4444);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1442,6 +1606,35 @@ async function syncAgentConfigUI() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 const charts = {};
+// ??? THEME (DARK / LIGHT) ???
+const isLight = () => document.documentElement.getAttribute("data-theme") === "light";
+const INK = () => (isLight() ? "#1f2937" : "#ffffff");
+const GRID = () => (isLight() ? "rgba(15, 23, 42, 0.08)" : "rgba(255, 255, 255, 0.06)");
+const TICK = () => (isLight() ? "#475569" : "#8e9e95");
+
+function applyChartTheme() {
+  if (!window.Chart) return;
+  Chart.defaults.color = TICK();
+  Chart.defaults.borderColor = GRID();
+}
+
+window.toggleTheme = function () {
+  const next = isLight() ? "dark" : "light";
+  document.documentElement.setAttribute("data-theme", next);
+  try { localStorage.setItem("iegms-theme", next); } catch (_) {}
+  applyChartTheme();
+  Object.keys(charts).forEach((k) => { try { charts[k].destroy(); } catch (_) {} delete charts[k]; });
+  const active = document.querySelector(".page.active")?.id?.replace("page-", "");
+  if (active && active !== "simulation") {
+    if (active === "dashboard") initDashboardCharts();
+    if (active === "monitoring") initMonitoringCharts();
+    if (active === "forecast") initForecastCharts();
+    if (active === "battery") initBatteryCharts();
+    if (active === "control") initControlCharts();
+    if (latestGridState) refresh2DViews(latestGridState);
+  }
+};
+
 const history24 = {
   hours: Array.from({ length: 24 }, (_, i) => `${String(i).padStart(2, "0")}:00`),
   demand: Array.from({ length: 24 }, (_, h) => ZONES.reduce((acc, z) => acc + interpCurve(h, LOCAL_PROFILES[z]), 0)),
@@ -1451,8 +1644,8 @@ const history24 = {
 };
 
 if (window.Chart) {
-  Chart.defaults.color = "#8e9e95";
-  Chart.defaults.borderColor = "rgba(255, 255, 255, 0.06)";
+  Chart.defaults.color = TICK();
+  Chart.defaults.borderColor = GRID();
   Chart.defaults.font.family = "'JetBrains Mono', monospace";
   Chart.defaults.font.size = 10.5;
 }
@@ -1483,7 +1676,7 @@ function initDashboardCharts() {
       data: {
         labels: history24.hours,
         datasets: [
-          { label: "Total Demand (MW)", data: [...history24.demand], borderColor: "#ffffff", backgroundColor: "rgba(255,255,255,0.06)", fill: true, tension: 0.4, pointRadius: 0, borderWidth: 2 },
+          { label: "Total Demand (MW)", data: [...history24.demand], borderColor: INK(), backgroundColor: isLight() ? "rgba(15,23,42,0.05)" : "rgba(255,255,255,0.06)", fill: true, tension: 0.4, pointRadius: 0, borderWidth: 2 },
           { label: "Clean Renewable (MW)", data: [...history24.renewable], borderColor: "#00e676", backgroundColor: "rgba(0,230,118,0.14)", fill: true, tension: 0.4, pointRadius: 0, borderWidth: 2.2 },
         ],
       },
@@ -1497,7 +1690,7 @@ function initDashboardCharts() {
       type: "doughnut",
       data: {
         labels: ["Solar + Wind", "BESS Discharge", "Thermal CCGT"],
-        datasets: [{ data: [180, 0, 320], backgroundColor: ["#00e676", "#ffffff", "#f59e0b"], borderWidth: 0 }],
+        datasets: [{ data: [180, 0, 320], backgroundColor: ["#00e676", INK(), "#f59e0b"], borderWidth: 0 }],
       },
       options: { responsive: true, maintainAspectRatio: false, cutout: "68%", plugins: { legend: { display: false } } },
     });
@@ -1510,7 +1703,7 @@ function initDashboardCharts() {
       data: {
         labels: ["Medical", "Industry", "Campus", "Comm.", "Resid.", "EV Hub"],
         datasets: [
-          { label: "Demand", data: [], backgroundColor: "rgba(255,255,255,0.22)", borderRadius: 4 },
+          { label: "Demand", data: [], backgroundColor: isLight() ? "rgba(15,23,42,0.22)" : "rgba(255,255,255,0.22)", borderRadius: 4 },
           { label: "Supplied", data: [], backgroundColor: "#00e676", borderRadius: 4 },
         ],
       },
@@ -1539,7 +1732,7 @@ function initMonitoringCharts() {
       data: {
         labels: [],
         datasets: [
-          { label: "Medical", data: [], borderColor: "#ffffff", tension: 0.35, pointRadius: 0, borderWidth: 1.8 },
+          { label: "Medical", data: [], borderColor: INK(), tension: 0.35, pointRadius: 0, borderWidth: 1.8 },
           { label: "Industry", data: [], borderColor: "#f59e0b", tension: 0.35, pointRadius: 0, borderWidth: 1.8 },
           { label: "Commercial", data: [], borderColor: "#00e676", tension: 0.35, pointRadius: 0, borderWidth: 2 },
           { label: "Residential", data: [], borderColor: "#5efc82", tension: 0.35, pointRadius: 0, borderWidth: 1.8 },
@@ -1558,7 +1751,7 @@ function initForecastCharts() {
       data: {
         labels: history24.hours,
         datasets: [
-          { label: "Predicted Total Demand (MW)", data: [...history24.demand], borderColor: "#ffffff", backgroundColor: "rgba(255,255,255,0.06)", fill: true, tension: 0.4, pointRadius: 0, borderWidth: 2 },
+          { label: "Predicted Total Demand (MW)", data: [...history24.demand], borderColor: INK(), backgroundColor: isLight() ? "rgba(15,23,42,0.05)" : "rgba(255,255,255,0.06)", fill: true, tension: 0.4, pointRadius: 0, borderWidth: 2 },
           { label: "Predicted Solar + Wind (MW)", data: [...history24.renewable], borderColor: "#00e676", borderDash: [5, 4], tension: 0.4, pointRadius: 0, borderWidth: 2.2 },
         ],
       },
@@ -1573,7 +1766,7 @@ function initForecastCharts() {
       data: {
         labels: history24.hours,
         datasets: [
-          { label: "Medical", data: history24.byEntity.hospital, borderColor: "#ffffff", pointRadius: 0, tension: 0.4, borderWidth: 1.8 },
+          { label: "Medical", data: history24.byEntity.hospital, borderColor: INK(), pointRadius: 0, tension: 0.4, borderWidth: 1.8 },
           { label: "Industry", data: history24.byEntity.industry, borderColor: "#f59e0b", pointRadius: 0, tension: 0.4, borderWidth: 1.8 },
           { label: "Commercial", data: history24.byEntity.commercial, borderColor: "#00e676", pointRadius: 0, tension: 0.4, borderWidth: 2 },
           { label: "Residential", data: history24.byEntity.residential, borderColor: "#5efc82", pointRadius: 0, tension: 0.4, borderWidth: 1.8 },
@@ -1622,12 +1815,12 @@ function drawTopologyMap(state) {
   const ctx = canvas.getContext("2d");
   const w = (canvas.width = canvas.offsetWidth);
   const h = (canvas.height = 220);
-  ctx.fillStyle = "#060908";
+  ctx.fillStyle = isLight() ? "#eef2f0" : "#060908";
   ctx.fillRect(0, 0, w, h);
 
   const hub = { x: w * 0.48, y: h * 0.5, label: "BESS HUB", val: `${Math.round(state.battery_soc_pct ?? 55)}% SoC`, col: "#00e676" };
   const nodes = [
-    { x: w * 0.14, y: h * 0.24, label: "Medical", val: `${(state.supplied?.hospital ?? 0).toFixed(0)} MW`, col: "#ffffff" },
+    { x: w * 0.14, y: h * 0.24, label: "Medical", val: `${(state.supplied?.hospital ?? 0).toFixed(0)} MW`, col: INK() },
     { x: w * 0.14, y: h * 0.76, label: "Industry", val: `${(state.supplied?.industry ?? 0).toFixed(0)} MW`, col: "#f59e0b" },
     { x: w * 0.48, y: h * 0.15, label: "Renewables", val: `${(state.generation?.solar_wind ?? 0).toFixed(0)} MW`, col: "#00e676" },
     { x: w * 0.82, y: h * 0.22, label: "Commercial", val: `${(state.supplied?.commercial ?? 0).toFixed(0)} MW`, col: "#5efc82" },
@@ -1646,7 +1839,7 @@ function drawTopologyMap(state) {
     ctx.strokeStyle = n.col;
     ctx.lineWidth = 2;
     ctx.stroke();
-    ctx.fillStyle = "#f4f7f5";
+    ctx.fillStyle = isLight() ? "#0f172a" : "#f4f7f5";
     ctx.font = "600 10px 'Plus Jakarta Sans', sans-serif";
     ctx.textAlign = "center";
     ctx.fillText(n.label, n.x, n.y + 22);
