@@ -63,6 +63,7 @@ class AppState:
     grid_agent = None
     plants: dict = default_plants()
     manual_loads: dict = {zone: 0.0 for zone in PRIORITY}
+    priority_override: Optional[list[str]] = None
 
 
 def _generate_internal_loads(hour: float) -> dict:
@@ -112,6 +113,7 @@ def run_optimization_step(advance_battery: bool = True) -> dict:
         AppState.simulated_hour,
         plants=AppState.plants,
         manual_loads=AppState.manual_loads,
+        priority_override=AppState.priority_override,
     )
     if advance_battery:
         AppState.battery_energy = result["battery_energy"]
@@ -276,6 +278,34 @@ def override_load(req: ManualLoadRequest):
         snapshot = run_optimization_step(advance_battery=False)
         return {"status": "success", "manual_loads": AppState.manual_loads, "state": snapshot}
     return {"status": "error", "message": f"Unknown zone ID: {req.zone}"}
+
+
+class PriorityUpdateRequest(BaseModel):
+    mode: str = "auto"                      # "auto" or "manual"
+    order: Optional[list[str]] = None       # Ordered list of 6 zone IDs when mode == "manual"
+
+
+@app.post("/api/priority/update")
+def update_priority(req: PriorityUpdateRequest):
+    if req.mode == "auto" or not req.order:
+        AppState.priority_override = None
+    else:
+        cleaned = [z for z in req.order if z in PRIORITY]
+        for z in PRIORITY:
+            if z not in cleaned:
+                cleaned.append(z)
+        if "hospital" in cleaned:
+            cleaned.remove("hospital")
+        cleaned.insert(0, "hospital")
+        AppState.priority_override = cleaned
+
+    snapshot = run_optimization_step(advance_battery=False)
+    return {
+        "status": "success",
+        "priority_mode": snapshot.get("priority_mode", "auto"),
+        "priority_order": snapshot.get("priority_order", PRIORITY),
+        "state": snapshot,
+    }
 
 
 # ── AI Grid Agent Endpoints (Gemini + Ollama Switchable) ─────────────────────

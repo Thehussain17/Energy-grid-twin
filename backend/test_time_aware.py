@@ -1,4 +1,10 @@
-from optimizer import optimize_grid, get_entity_schedule_status, _is_peak_hour
+from optimizer import (
+    optimize_grid,
+    get_entity_schedule_status,
+    get_dynamic_priority,
+    get_bess_protected_zones,
+    _is_peak_hour,
+)
 
 # Test 1: school closed at 19h
 sched = get_entity_schedule_status(19.0)
@@ -103,4 +109,40 @@ assert island_res["supplied"]["residential"] == 0.0
 assert island_res["supplied"]["commercial"] == 0.0
 assert island_res["battery_delta"] < 0.0
 
-print("\nALL OPTIMIZER, BESS PRIORITY & BLACKOUT TESTS PASSED")
+# Test 8: Dynamic time-of-day priority shifting across all 4 daily windows
+reg_morn, _, ord_morn = get_dynamic_priority(7.5)
+reg_mid, _, ord_mid = get_dynamic_priority(14.0)
+reg_eve, _, ord_eve = get_dynamic_priority(19.5)
+reg_night, _, ord_night = get_dynamic_priority(2.0)
+
+assert reg_morn == "morning_ramp" and ord_morn[0] == "hospital" and ord_morn[1] == "industry"
+assert reg_mid == "business_campus" and ord_mid == ["hospital", "industry", "school", "commercial", "residential", "ev_hub"]
+assert reg_eve == "evening_surge" and ord_eve[0] == "hospital" and ord_eve[1] == "residential" and ord_eve[-1] == "school"
+assert reg_night == "overnight_offpeak" and ord_night[0] == "hospital" and ord_night[1] == "residential"
+
+# Evening surge: Residential is P2 (protected by BESS), EV Hub is NEVER BESS-protected
+for hr, order in [(7.5, ord_morn), (14.0, ord_mid), (19.5, ord_eve), (2.0, ord_night)]:
+    prot = get_bess_protected_zones(order, hr)
+    assert "hospital" in prot, f"Hospital must always be BESS-protected at {hr}h"
+    assert "ev_hub" not in prot, f"EV Hub must NEVER be BESS-protected at {hr}h"
+
+eve_res = optimize_grid(loads, loads, 220.0, hour=19.5)
+assert eve_res["priority_mode"] == "auto"
+assert eve_res["priority_regime"] == "evening_surge"
+assert eve_res["priority_order"][1] == "residential"
+assert "residential" in eve_res["bess_protected"]
+assert "ev_hub" not in eve_res["bess_protected"]
+
+# Manual priority override: keeps hospital at P1 and respects custom order
+manual_res = optimize_grid(
+    loads,
+    loads,
+    220.0,
+    hour=14.0,
+    priority_override=["commercial", "hospital", "residential", "industry", "school", "ev_hub"],
+)
+assert manual_res["priority_mode"] == "manual"
+assert manual_res["priority_order"][0] == "hospital", "Hospital must remain locked at P1 even in manual override"
+assert manual_res["priority_order"][1] == "commercial"
+
+print("\nALL OPTIMIZER, DYNAMIC PRIORITY, BESS & BLACKOUT TESTS PASSED")

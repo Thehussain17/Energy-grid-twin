@@ -28,10 +28,94 @@ PRIORITY = [
     "ev_hub",
 ]
 
-# Only Tier 1–3 critical/high-priority zones may draw BESS emergency discharge.
-# Lower-priority / deferrable zones (commercial, residential, ev_hub) are shed first
-# and NEVER drain the BESS reserve.
+# Legacy daytime baseline kept for backwards compatibility; runtime BESS protection
+# is computed dynamically from the active time-of-day priority order (never EV Hub).
 BESS_PROTECTED_ZONES = ("hospital", "industry", "school")
+
+DYNAMIC_TIER_LABELS = [
+    "P1 · Critical",
+    "P2 · High",
+    "P3 · Elevated",
+    "P4 · Standard",
+    "P5 · Flexible",
+    "P6 · Deferrable",
+]
+
+
+def get_dynamic_priority(hour: float) -> tuple[str, str, list[str]]:
+    """
+    Returns (regime_id, regime_label, ordered_zones) for the given hour of day.
+    Medical Center (hospital) is always locked at P1 (life-safety critical).
+    Other zones shift automatically as urban demand regimes change across 24 hours.
+    """
+    h = hour % 24.0
+    if 6.0 <= h < 9.0:
+        return (
+            "morning_ramp",
+            "Morning Ramp (06:00–09:00)",
+            ["hospital", "industry", "school", "residential", "commercial", "ev_hub"],
+        )
+    if 9.0 <= h < 17.0:
+        return (
+            "business_campus",
+            "Business & Campus (09:00–17:00)",
+            ["hospital", "industry", "school", "commercial", "residential", "ev_hub"],
+        )
+    if 17.0 <= h < 23.0:
+        return (
+            "evening_surge",
+            "Evening Residential Surge (17:00–23:00)",
+            ["hospital", "residential", "commercial", "industry", "ev_hub", "school"],
+        )
+    return (
+        "overnight_offpeak",
+        "Overnight Off-Peak (23:00–06:00)",
+        ["hospital", "residential", "industry", "commercial", "ev_hub", "school"],
+    )
+
+
+def resolve_priority_order(
+    hour: float, priority_override: list[str] | None = None
+) -> tuple[str, str, str, list[str]]:
+    """
+    Resolves active dispatch priority order:
+      - Manual operator override if provided (with hospital locked at P1)
+      - Dynamic time-of-day priority regime otherwise
+    Returns (mode, regime_id, regime_label, ordered_zones).
+    """
+    if priority_override:
+        cleaned = []
+        for z in priority_override:
+            if z in PRIORITY and z not in cleaned:
+                cleaned.append(z)
+        for z in PRIORITY:
+            if z not in cleaned:
+                cleaned.append(z)
+        if "hospital" in cleaned:
+            cleaned.remove("hospital")
+        cleaned.insert(0, "hospital")
+        return ("manual", "manual_override", "Manual Operator Override", cleaned)
+
+    regime_id, regime_label, order = get_dynamic_priority(hour)
+    return ("auto", regime_id, regime_label, order)
+
+
+def get_bess_protected_zones(active_priority: list[str], hour: float) -> tuple[str, ...]:
+    """
+    Returns up to 3 active high-priority zones eligible for BESS emergency discharge.
+    Hospital is always protected; deferrable EV Supercharger Hub and closed/standby
+    zones are NEVER allowed to drain the BESS reserve.
+    """
+    protected = ["hospital"]
+    for z in active_priority:
+        if z in protected or z == "ev_hub":
+            continue
+        is_active, _ = _is_entity_active(z, hour)
+        if is_active:
+            protected.append(z)
+        if len(protected) >= 3:
+            break
+    return tuple(protected)
 
 # ── Time-Aware Schedule Policy ────────────────────────────────────────────────
 
@@ -124,16 +208,23 @@ def _is_entity_active(entity: str, hour: float) -> tuple[bool, str]:
     return False, sched["inactive_reason"]
 
 
-def get_entity_schedule_status(hour: float) -> dict:
-    """Returns per-entity schedule status at the given hour."""
+def get_entity_schedule_status(
+    hour: float, priority_order: list[str] | None = None
+) -> dict:
+    """Returns per-entity schedule status ordered by active priority at the given hour."""
+    order = priority_order if priority_order else get_dynamic_priority(hour)[2]
+    bess_prot = set(get_bess_protected_zones(order, hour))
     result = {}
-    for entity in PRIORITY:
+    for idx, entity in enumerate(order):
         sched = ENTITY_SCHEDULES[entity]
         active, reason = _is_entity_active(entity, hour)
         cap = sched["active_cap"] if active else sched["inactive_cap"]
+        tier_lbl = DYNAMIC_TIER_LABELS[idx] if idx < len(DYNAMIC_TIER_LABELS) else f"P{idx + 1}"
         result[entity] = {
             "label": sched["label"],
-            "tier": sched["tier"],
+            "tier": tier_lbl,
+            "priority_rank": idx + 1,
+            "bess_protected": entity in bess_prot,
             "active": active,
             "cap_fraction": cap,
             "cap_pct": int(cap * 100),
@@ -176,13 +267,19 @@ def apply_time_caps(demand: dict, hour: float, manual_loads: dict = None) -> tup
     return capped, total_freed, notes
 
 
-def redistribute_freed_power(capped_demand: dict, freed_mw: float, hour: float) -> tuple[dict, list]:
+def redistribute_freed_power(
+    capped_demand: dict,
+    freed_mw: float,
+    hour: float,
+    priority_order: list[str] | None = None,
+) -> tuple[dict, list]:
     """Redistribute freed MW to active higher-priority zones (up to +18% headroom)."""
     boosted = dict(capped_demand)
     notes = []
     remaining = freed_mw
+    order = priority_order if priority_order else get_dynamic_priority(hour)[2]
 
-    for entity in PRIORITY:
+    for idx, entity in enumerate(order):
         if remaining < 0.5:
             break
         active, _ = _is_entity_active(entity, hour)
@@ -198,7 +295,7 @@ def redistribute_freed_power(capped_demand: dict, freed_mw: float, hour: float) 
         remaining -= boost
         notes.append(
             f"[REDIR] +{round(boost, 1)} MW reallocated to {sched['label']} "
-            f"(Priority {PRIORITY.index(entity) + 1})."
+            f"(Priority P{idx + 1})."
         )
 
     return boosted, notes
@@ -222,20 +319,27 @@ def optimize_grid(
     hour: float = 12.0,
     plants: dict = None,
     manual_loads: dict = None,
+    priority_override: list[str] = None,
 ) -> dict:
     """
-    Time-aware smart-grid optimizer with strict conservation of energy:
-      1. Apply time-of-day schedule caps + manual operator load spikes.
-      2. Compute true available generation (Solar+Wind first, then Thermal Plants 1 & 2).
-      3. Allocate generation strictly in PRIORITY order (Hospital -> Industry -> School ->
-         Commercial -> Residential -> EV Hub).
-      4. BESS emergency discharge ONLY serves protected high-priority tiers
-         (Hospital, Industry, School) — never lower-priority loads like EV Hub or Residential.
-      5. If total generation + BESS discharge cannot meet demand (including Hospital when all
+    Time-aware smart-grid optimizer with dynamic time-of-day priorities and strict
+    conservation of energy:
+      1. Resolve dynamic time-of-day priority order (or operator manual override).
+      2. Apply time-of-day schedule caps + manual operator load spikes.
+      3. Compute true available generation (Solar+Wind first, then Thermal Plants 1 & 2).
+      4. Allocate generation strictly in active priority order.
+      5. BESS emergency discharge ONLY serves active protected high-priority tiers
+         (never deferrable EV Supercharger Hub or closed/standby zones).
+      6. If total generation + BESS discharge cannot meet demand (including Hospital when all
          sources are off and BESS is empty/offline), unmet loads are physically shed to 0 MW.
     """
+    priority_mode, regime_id, regime_label, active_priority = resolve_priority_order(
+        hour, priority_override
+    )
+    bess_protected = get_bess_protected_zones(active_priority, hour)
+
     raw_demand = {}
-    for entity in PRIORITY:
+    for entity in active_priority:
         act = float(actual_loads.get(entity, 0.0) or 0.0)
         pred = float(predicted_loads.get(entity, 0.0) or 0.0)
         raw_demand[entity] = max(act, pred)
@@ -244,7 +348,9 @@ def optimize_grid(
     capped_demand, freed_mw, cap_notes = apply_time_caps(raw_demand, hour, manual_loads)
 
     # Step 2: Redistribute freed capacity to active higher-priority zones
-    demand, redir_notes = redistribute_freed_power(capped_demand, freed_mw, hour)
+    demand, redir_notes = redistribute_freed_power(
+        capped_demand, freed_mw, hour, priority_order=active_priority
+    )
     actions = list(cap_notes) + list(redir_notes)
 
     # Step 3: Available generation capacity (Renewable + Thermal) & BESS breaker state
@@ -282,9 +388,9 @@ def optimize_grid(
         )
 
     # Step 4: Strict priority allocation of physical generation (no phantom MW)
-    supplied = {entity: 0.0 for entity in PRIORITY}
+    supplied = {entity: 0.0 for entity in active_priority}
     remaining_gen = dynamic_max_capacity
-    for entity in PRIORITY:
+    for entity in active_priority:
         alloc = min(demand[entity], remaining_gen)
         supplied[entity] = alloc
         remaining_gen -= alloc
@@ -298,7 +404,7 @@ def optimize_grid(
         if bess_active:
             if _is_peak_hour(hour) and battery_energy > PEAK_BATTERY_BOOST_MW and thermal_capacity > 0:
                 # Peak shaving: offset thermal generation for protected high-priority load only
-                protected_thermal_load = max(0.0, sum(supplied[z] for z in BESS_PROTECTED_ZONES) - renewable_available)
+                protected_thermal_load = max(0.0, sum(supplied[z] for z in bess_protected) - renewable_available)
                 boost = min(PEAK_BATTERY_BOOST_MW, battery_energy * 0.25, protected_thermal_load)
                 if boost > 1.0:
                     battery_delta = -boost
@@ -318,11 +424,11 @@ def optimize_grid(
         else:
             actions.append("[OK] Grid balanced (BESS reserve breaker disconnected).")
     else:
-        # Generation deficit: ONLY protected tiers (Hospital, Industry, School) may draw BESS!
+        # Generation deficit: ONLY active protected tiers may draw BESS (never EV Hub)!
         if bess_active and battery_energy > 0.1:
             bess_budget = min(BATTERY_MAX_RATE, battery_energy)
             total_bess_used = 0.0
-            for entity in BESS_PROTECTED_ZONES:
+            for entity in bess_protected:
                 unmet = demand[entity] - supplied[entity]
                 if unmet > 0.05 and bess_budget > 0.05:
                     from_bess = min(unmet, bess_budget)
@@ -331,12 +437,13 @@ def optimize_grid(
                     battery_delta -= from_bess
                     total_bess_used += from_bess
             if total_bess_used > 0.1:
+                prot_names = "/".join(ENTITY_SCHEDULES[z]["label"].split()[0] for z in bess_protected)
                 actions.append(
-                    f"[BESS] Discharging {round(total_bess_used, 1)} MW reserve strictly for protected tiers (Hospital/Industry/School)."
+                    f"[BESS] Discharging {round(total_bess_used, 1)} MW reserve strictly for protected tiers ({prot_names})."
                 )
 
         # Log all shed zones (including Hospital if generation + BESS could not cover it!)
-        for entity in reversed(PRIORITY):
+        for entity in reversed(active_priority):
             unmet = demand[entity] - supplied[entity]
             if unmet > 0.05:
                 pct = int(round((unmet / demand[entity]) * 100)) if demand[entity] > 0 else 0
@@ -346,7 +453,7 @@ def optimize_grid(
                         f"[CRITICAL] Medical Center lost {pct}% (-{round(unmet, 1)} MW) — insufficient generation & BESS reserve!",
                     )
                 else:
-                    note_suffix = " (BESS reserved for critical tiers)" if entity not in BESS_PROTECTED_ZONES else ""
+                    note_suffix = " (BESS reserved for critical tiers)" if entity not in bess_protected else ""
                     actions.append(
                         f"[SHED] Shedding {pct}% (-{round(unmet, 1)} MW) from {ENTITY_SCHEDULES[entity]['label']}{note_suffix}."
                     )
@@ -416,7 +523,12 @@ def optimize_grid(
         "peak_boost_active": peak_boost_active,
         "freed_mw": round(freed_mw, 2),
         "deficit_mw": round(deficit, 2),
-        "schedule_status": get_entity_schedule_status(hour),
+        "priority_order": active_priority,
+        "priority_mode": priority_mode,
+        "priority_regime": regime_id,
+        "priority_regime_label": regime_label,
+        "bess_protected": list(bess_protected),
+        "schedule_status": get_entity_schedule_status(hour, priority_order=active_priority),
         "plants_state": {
             pid: {"active": bool(p.get("active", True)), "capacity": float(p.get("capacity", 0.0))}
             for pid, p in plants.items()

@@ -1309,3 +1309,201 @@ html[data-theme="light"] [style*="background:rgba(255,255,255,0.03)"] { backgrou
 html[data-theme="light"] [style*="background:rgba(255,255,255,0.025)"] { background: rgba(15, 23, 42, 0.03) !important; }
 html[data-theme="light"] #bar-batt { background: #334155 !important; }
 
+
+
+/* ─── Dynamic Time-of-Day Priority Controls ─── */
+.dock-regime-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 9px;
+  margin-bottom: 8px;
+  border-radius: 8px;
+  background: rgba(0, 230, 118, 0.08);
+  border: 1px solid rgba(0, 230, 118, 0.24);
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--green);
+}
+.dock-regime-bar .mono {
+  font-size: 9.5px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(0, 230, 118, 0.16);
+  color: var(--green);
+}
+.bess-tag {
+  font-size: 8.5px;
+  font-weight: 700;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-secondary);
+  margin-left: 4px;
+  letter-spacing: 0.04em;
+}
+.priority-mode-group,
+.window-jump-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.priority-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.window-pill {
+  padding: 5px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border-subtle);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.window-pill:hover {
+  color: #fff;
+  border-color: var(--border-green);
+}
+.window-pill.active {
+  background: var(--green);
+  color: #030805;
+  border-color: var(--green);
+  font-weight: 700;
+}
+.priority-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.priority-row {
+  display: grid;
+  grid-template-columns: 42px minmax(150px, 1.3fr) 115px 110px 135px 88px;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--border-subtle);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.priority-row:hover {
+  border-color: rgba(0, 230, 118, 0.3);
+}
+.priority-row.is-p1 {
+  border-color: rgba(0, 230, 118, 0.38);
+  background: rgba(0, 230, 118, 0.06);
+}
+.prio-rank {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 26px;
+  border-radius: 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 800;
+  background: rgba(0, 230, 118, 0.14);
+  color: var(--green);
+}
+.prio-bess-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 7px;
+  border-radius: 5px;
+  letter-spacing: 0.04em;
+}
+.prio-bess-pill.protected {
+  background: rgba(0, 230, 118, 0.14);
+  color: var(--green);
+}
+.prio-bess-pill.unprotected {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-muted);
+}
+.prio-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+}
+.prio-move-btn {
+  width: 28px;
+  height: 26px;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.prio-move-btn:hover:not(:disabled) {
+  background: var(--green);
+  color: #030805;
+  border-color: var(--green);
+}
+.prio-move-btn:disabled {
+  opacity: 0.32;
+  cursor: not-allowed;
+}
+@media (max-width: 900px) {
+  .priority-row {
+    grid-template-columns: 38px 1fr auto;
+    row-gap: 6px;
+  }
+}
+
+html[data-theme="light"] .dock-regime-bar {
+  background: rgba(0, 161, 82, 0.1);
+  border-color: rgba(0, 161, 82, 0.28);
+  color: var(--green-deep);
+}
+html[data-theme="light"] .dock-regime-bar .mono {
+  color: var(--green-deep);
+}
+html[data-theme="light"] .bess-tag,
+html[data-theme="light"] .prio-bess-pill.unprotected {
+  background: rgba(15, 23, 42, 0.06);
+  color: #475569;
+}
+html[data-theme="light"] .window-pill {
+  background: rgba(15, 23, 42, 0.04);
+  color: #334155;
+}
+html[data-theme="light"] .window-pill:hover {
+  color: #0f1a14;
+}
+html[data-theme="light"] .window-pill.active {
+  background: var(--green);
+  color: #fff;
+}
+html[data-theme="light"] .priority-row {
+  background: rgba(15, 23, 42, 0.025);
+}
+html[data-theme="light"] .priority-row.is-p1 {
+  background: rgba(0, 161, 82, 0.08);
+}
+html[data-theme="light"] .prio-rank,
+html[data-theme="light"] .prio-bess-pill.protected {
+  color: var(--green-deep);
+}
+html[data-theme="light"] .prio-move-btn {
+  background: rgba(15, 23, 42, 0.04);
+  color: #334155;
+}
+html[data-theme="light"] .prio-move-btn:hover:not(:disabled) {
+  color: #fff;
+}

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Autonomous Smart Grid Digital Twin</title>
   <script>try{var th=localStorage.getItem("iegms-theme");if(th)document.documentElement.setAttribute("data-theme",th);}catch(e){}</script>
-  <link rel="stylesheet" href="style.css?v=6.0">
+  <link rel="stylesheet" href="style.css?v=6.1">
 
   <!-- Modern Three.js r187 (0.187.0) ES Module Import Map -->
   <script type="importmap">
@@ -93,7 +93,7 @@
       <div class="map-label" id="label-hospital" onclick="inspectZone('hospital')">
         <div class="label-head"><span class="label-dot" id="dot-hospital"></span><span>Medical Center</span><span class="label-mw" id="pin-hospital-mw">-- MW</span></div>
         <div class="label-details">
-          <div class="label-line"><span>Priority</span><strong>Critical (Tier 1)</strong></div>
+          <div class="label-line"><span>Priority</span><strong id="info-hospital-priority">P1 · Critical</strong></div>
           <div class="label-line"><span>Demand</span><strong><span id="info-hospital-demand">--</span> MW</strong></div>
           <div class="label-line"><span>Supplied</span><strong><span id="info-hospital-supplied">--</span> MW (<span id="info-hospital-usage">--</span>%)</strong></div>
         </div>
@@ -102,7 +102,7 @@
       <div class="map-label" id="label-industry" onclick="inspectZone('industry')">
         <div class="label-head"><span class="label-dot" id="dot-industry"></span><span>Industrial Park</span><span class="label-mw" id="pin-industry-mw">-- MW</span></div>
         <div class="label-details">
-          <div class="label-line"><span>Priority</span><strong>High (Tier 2)</strong></div>
+          <div class="label-line"><span>Priority</span><strong id="info-industry-priority">P2 · High</strong></div>
           <div class="label-line"><span>Demand</span><strong><span id="info-industry-demand">--</span> MW</strong></div>
           <div class="label-line"><span>Supplied</span><strong><span id="info-industry-supplied">--</span> MW (<span id="info-industry-usage">--</span>%)</strong></div>
         </div>
@@ -111,7 +111,7 @@
       <div class="map-label" id="label-school" onclick="inspectZone('school')">
         <div class="label-head"><span class="label-dot" id="dot-school"></span><span>University Campus</span><span class="label-mw" id="pin-school-mw">-- MW</span></div>
         <div class="label-details">
-          <div class="label-line"><span>Priority</span><strong>Medium-High (Tier 3)</strong></div>
+          <div class="label-line"><span>Priority</span><strong id="info-school-priority">P3 · Elevated</strong></div>
           <div class="label-line"><span>Demand</span><strong><span id="info-school-demand">--</span> MW</strong></div>
           <div class="label-line"><span>Supplied</span><strong><span id="info-school-supplied">--</span> MW (<span id="info-school-usage">--</span>%)</strong></div>
         </div>
@@ -120,7 +120,7 @@
       <div class="map-label" id="label-commercial" onclick="inspectZone('commercial')">
         <div class="label-head"><span class="label-dot" id="dot-commercial"></span><span>Commercial Core</span><span class="label-mw" id="pin-commercial-mw">-- MW</span></div>
         <div class="label-details">
-          <div class="label-line"><span>Priority</span><strong>Medium (Tier 4)</strong></div>
+          <div class="label-line"><span>Priority</span><strong id="info-commercial-priority">P4 · Standard</strong></div>
           <div class="label-line"><span>Demand</span><strong><span id="info-commercial-demand">--</span> MW</strong></div>
           <div class="label-line"><span>Supplied</span><strong><span id="info-commercial-supplied">--</span> MW (<span id="info-commercial-usage">--</span>%)</strong></div>
         </div>
@@ -129,7 +129,7 @@
       <div class="map-label" id="label-residential" onclick="inspectZone('residential')">
         <div class="label-head"><span class="label-dot" id="dot-residential"></span><span>Residential District</span><span class="label-mw" id="pin-residential-mw">-- MW</span></div>
         <div class="label-details">
-          <div class="label-line"><span>Priority</span><strong>Standard (Tier 5)</strong></div>
+          <div class="label-line"><span>Priority</span><strong id="info-residential-priority">P5 · Flexible</strong></div>
           <div class="label-line"><span>Demand</span><strong><span id="info-residential-demand">--</span> MW</strong></div>
           <div class="label-line"><span>Supplied</span><strong><span id="info-residential-supplied">--</span> MW (<span id="info-residential-usage">--</span>%)</strong></div>
         </div>
@@ -138,7 +138,7 @@
       <div class="map-label" id="label-ev_hub" onclick="inspectZone('ev_hub')">
         <div class="label-head"><span class="label-dot" id="dot-ev_hub"></span><span>EV Supercharger</span><span class="label-mw" id="pin-ev_hub-mw">-- MW</span></div>
         <div class="label-details">
-          <div class="label-line"><span>Priority</span><strong>Deferrable (Tier 6)</strong></div>
+          <div class="label-line"><span>Priority</span><strong id="info-ev_hub-priority">P6 · Deferrable</strong></div>
           <div class="label-line"><span>Demand</span><strong><span id="info-ev_hub-demand">--</span> MW</strong></div>
           <div class="label-line"><span>Supplied</span><strong><span id="info-ev_hub-supplied">--</span> MW (<span id="info-ev_hub-usage">--</span>%)</strong></div>
         </div>
@@ -237,29 +237,36 @@
             <div class="meter-bg"><div class="meter-fill" id="batt-meter" style="width:55%"></div></div>
           </div>
 
-          <div class="zone-row-item" onclick="inspectZone('hospital')">
-            <div class="zone-row-top"><span>Medical Center <span class="zone-tier-tag">P1</span></span><span class="mono"><span id="pan-hosp-sup">0</span>/<span id="pan-hosp-dem">0</span> MW</span></div>
-            <div class="meter-bg"><div class="meter-fill" id="pan-hosp-bar"></div></div>
+          <div class="dock-regime-bar" title="Dynamic priority order shifts automatically with time of day">
+            <span id="dock-priority-regime">Morning Ramp (06:00–09:00)</span>
+            <span class="mono" id="dock-priority-mode">AUTO</span>
           </div>
-          <div class="zone-row-item" onclick="inspectZone('industry')">
-            <div class="zone-row-top"><span>Industrial Park <span class="zone-tier-tag">P2</span></span><span class="mono"><span id="pan-ind-sup">0</span>/<span id="pan-ind-dem">0</span> MW</span></div>
-            <div class="meter-bg"><div class="meter-fill" id="pan-ind-bar"></div></div>
-          </div>
-          <div class="zone-row-item" onclick="inspectZone('school')">
-            <div class="zone-row-top"><span>University Campus <span class="zone-tier-tag">P3</span></span><span class="mono"><span id="pan-sch-sup">0</span>/<span id="pan-sch-dem">0</span> MW</span></div>
-            <div class="meter-bg"><div class="meter-fill" id="pan-sch-bar"></div></div>
-          </div>
-          <div class="zone-row-item" onclick="inspectZone('commercial')">
-            <div class="zone-row-top"><span>Commercial Core <span class="zone-tier-tag">P4</span></span><span class="mono"><span id="pan-com-sup">0</span>/<span id="pan-com-dem">0</span> MW</span></div>
-            <div class="meter-bg"><div class="meter-fill" id="pan-com-bar"></div></div>
-          </div>
-          <div class="zone-row-item" onclick="inspectZone('residential')">
-            <div class="zone-row-top"><span>Residential District <span class="zone-tier-tag">P5</span></span><span class="mono"><span id="pan-res-sup">0</span>/<span id="pan-res-dem">0</span> MW</span></div>
-            <div class="meter-bg"><div class="meter-fill" id="pan-res-bar"></div></div>
-          </div>
-          <div class="zone-row-item" onclick="inspectZone('ev_hub')">
-            <div class="zone-row-top"><span>EV Supercharger Hub <span class="zone-tier-tag">P6</span></span><span class="mono"><span id="pan-ev-sup">0</span>/<span id="pan-ev-dem">0</span> MW</span></div>
-            <div class="meter-bg"><div class="meter-fill" id="pan-ev-bar"></div></div>
+
+          <div id="dock-zones-list">
+            <div class="zone-row-item" id="zone-row-hospital" onclick="inspectZone('hospital')">
+              <div class="zone-row-top"><span>Medical Center <span class="zone-tier-tag" id="tier-tag-hospital">P1</span><span class="bess-tag" id="bess-tag-hospital">BESS</span></span><span class="mono"><span id="pan-hosp-sup">0</span>/<span id="pan-hosp-dem">0</span> MW</span></div>
+              <div class="meter-bg"><div class="meter-fill" id="pan-hosp-bar"></div></div>
+            </div>
+            <div class="zone-row-item" id="zone-row-industry" onclick="inspectZone('industry')">
+              <div class="zone-row-top"><span>Industrial Park <span class="zone-tier-tag" id="tier-tag-industry">P2</span><span class="bess-tag" id="bess-tag-industry">BESS</span></span><span class="mono"><span id="pan-ind-sup">0</span>/<span id="pan-ind-dem">0</span> MW</span></div>
+              <div class="meter-bg"><div class="meter-fill" id="pan-ind-bar"></div></div>
+            </div>
+            <div class="zone-row-item" id="zone-row-school" onclick="inspectZone('school')">
+              <div class="zone-row-top"><span>University Campus <span class="zone-tier-tag" id="tier-tag-school">P3</span><span class="bess-tag" id="bess-tag-school">BESS</span></span><span class="mono"><span id="pan-sch-sup">0</span>/<span id="pan-sch-dem">0</span> MW</span></div>
+              <div class="meter-bg"><div class="meter-fill" id="pan-sch-bar"></div></div>
+            </div>
+            <div class="zone-row-item" id="zone-row-commercial" onclick="inspectZone('commercial')">
+              <div class="zone-row-top"><span>Commercial Core <span class="zone-tier-tag" id="tier-tag-commercial">P4</span><span class="bess-tag" id="bess-tag-commercial" style="display:none">BESS</span></span><span class="mono"><span id="pan-com-sup">0</span>/<span id="pan-com-dem">0</span> MW</span></div>
+              <div class="meter-bg"><div class="meter-fill" id="pan-com-bar"></div></div>
+            </div>
+            <div class="zone-row-item" id="zone-row-residential" onclick="inspectZone('residential')">
+              <div class="zone-row-top"><span>Residential District <span class="zone-tier-tag" id="tier-tag-residential">P5</span><span class="bess-tag" id="bess-tag-residential" style="display:none">BESS</span></span><span class="mono"><span id="pan-res-sup">0</span>/<span id="pan-res-dem">0</span> MW</span></div>
+              <div class="meter-bg"><div class="meter-fill" id="pan-res-bar"></div></div>
+            </div>
+            <div class="zone-row-item" id="zone-row-ev_hub" onclick="inspectZone('ev_hub')">
+              <div class="zone-row-top"><span>EV Supercharger Hub <span class="zone-tier-tag" id="tier-tag-ev_hub">P6</span><span class="bess-tag" id="bess-tag-ev_hub" style="display:none">BESS</span></span><span class="mono"><span id="pan-ev-sup">0</span>/<span id="pan-ev-dem">0</span> MW</span></div>
+              <div class="meter-bg"><div class="meter-fill" id="pan-ev-bar"></div></div>
+            </div>
           </div>
           <div style="font-size:10.5px;color:var(--text-muted);margin-top:6px;text-align:center">Click any 3D building or zone row to inspect</div>
         </div>
@@ -562,7 +569,35 @@
 
   <!-- PAGE 6: CONTROL CENTER & AI SETTINGS -->
   <div class="page" id="page-control">
-    <div class="section-header"><div class="section-label">Grid Dispatch &amp; Dual-Provider AI Configuration</div></div>
+    <div class="section-header">
+      <div class="section-label">Grid Dispatch, Dynamic Priorities &amp; AI Configuration</div>
+      <span class="panel-badge badge-green" id="ctrl-priority-regime">Morning Ramp (06:00–09:00)</span>
+    </div>
+
+    <div class="panel" style="margin-bottom:16px">
+      <div class="panel-header">
+        <div class="panel-title">Dynamic Time-of-Day Priority Dispatch</div>
+        <div class="priority-mode-group">
+          <button class="window-pill active" id="btn-prio-auto" onclick="setPriorityMode('auto')">Auto (Time-of-Day)</button>
+          <button class="window-pill" id="btn-prio-manual" onclick="setPriorityMode('manual')">Manual Override</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div class="priority-toolbar">
+          <div style="font-size:12px;color:var(--text-secondary)">
+            Priorities automatically shift across 4 daily urban demand windows (Medical Center locked at <strong>P1</strong>; BESS protects top active tiers and never discharges for EV Hub).
+          </div>
+          <div class="window-jump-group">
+            <button class="window-pill" data-regime="morning_ramp" onclick="jumpToTimeWindow(7.5)">07:30 Morning</button>
+            <button class="window-pill" data-regime="business_campus" onclick="jumpToTimeWindow(13.0)">13:00 Business</button>
+            <button class="window-pill" data-regime="evening_surge" onclick="jumpToTimeWindow(19.5)">19:30 Evening</button>
+            <button class="window-pill" data-regime="overnight_offpeak" onclick="jumpToTimeWindow(2.0)">02:00 Overnight</button>
+          </div>
+        </div>
+        <div class="priority-list" id="ctrl-priority-list"></div>
+      </div>
+    </div>
+
     <div class="grid-2">
       <div class="panel">
         <div class="panel-header"><div class="panel-title">AI Agent Provider (Gemini 3.8 / 4 &harr; Ollama)</div><span class="panel-badge badge-green" id="ctrl-ai-badge">GEMINI</span></div>
@@ -704,7 +739,7 @@
   </div>
 </div>
 
-<script src="app.js?v=6.3"></script>
+<script src="app.js?v=6.4"></script>
 <script type="module">
   import * as THREE from 'three';
   import { OrbitControls } from 'three/addons/controls/OrbitControls.js';

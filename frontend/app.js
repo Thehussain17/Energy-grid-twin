@@ -63,7 +63,73 @@ function interpCurve(hour, curve) {
   return curve[keys[0]];
 }
 
-const BESS_PROTECTED_ZONES = ["hospital", "industry", "school"];
+const DYNAMIC_TIER_LABELS = [
+  "P1 · Critical",
+  "P2 · High",
+  "P3 · Elevated",
+  "P4 · Standard",
+  "P5 · Flexible",
+  "P6 · Deferrable",
+];
+
+function getDynamicPriority(hour) {
+  const h = ((hour % 24) + 24) % 24;
+  if (h >= 6 && h < 9) {
+    return {
+      regime: "morning_ramp",
+      label: "Morning Ramp (06:00–09:00)",
+      order: ["hospital", "industry", "school", "residential", "commercial", "ev_hub"],
+    };
+  }
+  if (h >= 9 && h < 17) {
+    return {
+      regime: "business_campus",
+      label: "Business & Campus (09:00–17:00)",
+      order: ["hospital", "industry", "school", "commercial", "residential", "ev_hub"],
+    };
+  }
+  if (h >= 17 && h < 23) {
+    return {
+      regime: "evening_surge",
+      label: "Evening Residential Surge (17:00–23:00)",
+      order: ["hospital", "residential", "commercial", "industry", "ev_hub", "school"],
+    };
+  }
+  return {
+    regime: "overnight_offpeak",
+    label: "Overnight Off-Peak (23:00–06:00)",
+    order: ["hospital", "residential", "industry", "commercial", "ev_hub", "school"],
+  };
+}
+
+function resolvePriorityOrder(hour, mode, manualOrder) {
+  if (mode === "manual" && Array.isArray(manualOrder) && manualOrder.length) {
+    const cleaned = manualOrder.filter((z, idx) => ZONES.includes(z) && manualOrder.indexOf(z) === idx);
+    ZONES.forEach((z) => { if (!cleaned.includes(z)) cleaned.push(z); });
+    const withoutHosp = cleaned.filter((z) => z !== "hospital");
+    return {
+      mode: "manual",
+      regime: "manual_override",
+      label: "Manual Operator Override",
+      order: ["hospital", ...withoutHosp],
+    };
+  }
+  const dyn = getDynamicPriority(hour);
+  return { mode: "auto", ...dyn };
+}
+
+function getBessProtectedZones(activeOrder, hour) {
+  const h = ((hour % 24) + 24) % 24;
+  const prot = ["hospital"];
+  for (const z of activeOrder) {
+    if (prot.includes(z) || z === "ev_hub") continue;
+    const [s, e] = LOCAL_SCHED[z].active;
+    const isAct = h >= s && h < e;
+    if (isAct) prot.push(z);
+    if (prot.length >= 3) break;
+  }
+  return prot;
+}
 
 const localSim = {
   backendOnline: false,
@@ -74,16 +140,22 @@ const localSim = {
   plants: { solar_wind: true, plant1: true, plant2: true, bess: true },
   plantCaps: { solar_wind: 280, plant1: 300, plant2: 300, bess: 400 },
   spikes: { hospital: 0, industry: 0, school: 0, commercial: 0, residential: 0, ev_hub: 0 },
+  priorityMode: "auto",
+  priorityOrder: null,
 };
 
 function computeLocalState(advanceBatt = false) {
   const h = ((localSim.hour % 24) + 24) % 24;
+  const prio = resolvePriorityOrder(h, localSim.priorityMode, localSim.priorityOrder);
+  const activeOrder = prio.order;
+  const bessProtected = getBessProtectedZones(activeOrder, h);
+
   const demand = {};
   const schedStatus = {};
   let freed = 0;
   const actions = [];
 
-  ZONES.forEach((z) => {
+  activeOrder.forEach((z, idx) => {
     const base = interpCurve(h, LOCAL_PROFILES[z]);
     const [s, e] = LOCAL_SCHED[z].active;
     const isAct = z === "hospital" || (h >= s && h < e);
@@ -95,7 +167,9 @@ function computeLocalState(advanceBatt = false) {
     if (spike > 0) actions.push(`[STRESS] ${ZONE_META[z].label}: +${spike} MW manual demand spike.`);
     schedStatus[z] = {
       label: ZONE_META[z].label,
-      tier: ZONE_META[z].tier,
+      tier: DYNAMIC_TIER_LABELS[idx] || `P${idx + 1}`,
+      priority_rank: idx + 1,
+      bess_protected: bessProtected.includes(z),
       active: isAct,
       cap_pct: Math.round(cap * 100),
       reason: isAct ? `${ZONE_META[z].label} active window (${String(s).padStart(2, "0")}:00–${String(e).padStart(2, "0")}:00).` : LOCAL_SCHED[z].reason,
@@ -115,10 +189,10 @@ function computeLocalState(advanceBatt = false) {
     actions.unshift("[CRITICAL] ALL Grid Generation Sources OFFLINE — BESS islanding protected tiers only!");
   }
 
-  // Strict conservation-of-energy allocation in PRIORITY order
+  // Strict conservation-of-energy allocation in dynamic priority order
   const supplied = {};
   let remGen = maxCap;
-  ZONES.forEach((z) => {
+  activeOrder.forEach((z) => {
     const alloc = Math.min(demand[z], remGen);
     supplied[z] = +alloc.toFixed(1);
     remGen = Math.max(0, remGen - alloc);
@@ -130,7 +204,7 @@ function computeLocalState(advanceBatt = false) {
   if (remGen > 0.5) {
     if (bessOn) {
       if (isPeak && localSim.battery > 80 && thermCap > 0) {
-        const protTherm = Math.max(0, BESS_PROTECTED_ZONES.reduce((a, z) => a + supplied[z], 0) - renAvail);
+        const protTherm = Math.max(0, bessProtected.reduce((a, z) => a + supplied[z], 0) - renAvail);
         const boost = Math.min(70, localSim.battery * 0.25, protTherm);
         if (boost > 1) {
           battDelta = -boost;
@@ -147,11 +221,11 @@ function computeLocalState(advanceBatt = false) {
       actions.push("[OK] Grid balanced (BESS reserve breaker disconnected).");
     }
   } else {
-    // Generation deficit: BESS ONLY discharges for protected tiers (Hospital, Industry, School)
+    // Generation deficit: BESS ONLY discharges for active protected tiers (never EV Hub)
     if (bessOn && localSim.battery > 0.1) {
       let bessBudget = Math.min(120, localSim.battery);
       let bessUsed = 0;
-      BESS_PROTECTED_ZONES.forEach((z) => {
+      bessProtected.forEach((z) => {
         const unmet = demand[z] - supplied[z];
         if (unmet > 0.05 && bessBudget > 0.05) {
           const fromBess = Math.min(unmet, bessBudget);
@@ -162,20 +236,21 @@ function computeLocalState(advanceBatt = false) {
         }
       });
       if (bessUsed > 0.1) {
-        actions.push(`[BESS] Discharging ${bessUsed.toFixed(1)} MW reserve strictly for protected tiers (Hospital/Industry/School).`);
+        const protLbl = bessProtected.map((z) => ZONE_META[z].label.split(" ")[0]).join("/");
+        actions.push(`[BESS] Discharging ${bessUsed.toFixed(1)} MW reserve strictly for protected tiers (${protLbl}).`);
       }
     }
 
     // Log all shed zones including Hospital if generation + BESS couldn't cover it
-    for (let i = ZONES.length - 1; i >= 0; i--) {
-      const z = ZONES[i];
+    for (let i = activeOrder.length - 1; i >= 0; i--) {
+      const z = activeOrder[i];
       const unmet = demand[z] - supplied[z];
       if (unmet > 0.05) {
         const pct = Math.round((unmet / Math.max(1, demand[z])) * 100);
         if (z === "hospital") {
           actions.unshift(`[CRITICAL] Medical Center lost ${pct}% (-${unmet.toFixed(1)} MW) — insufficient generation & BESS reserve!`);
         } else {
-          const tag = BESS_PROTECTED_ZONES.includes(z) ? "" : " (BESS reserved for critical tiers)";
+          const tag = bessProtected.includes(z) ? "" : " (BESS reserved for critical tiers)";
           actions.push(`[SHED] Shedding ${pct}% (-${unmet.toFixed(1)} MW) from ${ZONE_META[z].label}${tag}.`);
         }
       }
@@ -224,6 +299,11 @@ function computeLocalState(advanceBatt = false) {
     transformer_temp_c: +(25 + (totalSup / 850) * 22).toFixed(1),
     max_capacity_mw: maxCap,
     freed_mw: +freed.toFixed(1),
+    priority_order: activeOrder,
+    priority_mode: prio.mode,
+    priority_regime: prio.regime,
+    priority_regime_label: prio.label,
+    bess_protected: bessProtected,
     schedule_status: schedStatus,
     predicted_loads: Object.fromEntries(ZONES.map((z) => [z, +interpCurve(h + 1, LOCAL_PROFILES[z]).toFixed(1)])),
     actions,
@@ -1272,7 +1352,9 @@ function refreshInspectorCard() {
   const sched = latestGridState.schedule_status?.[selectedZoneId];
   const spike = latestGridState.manual_loads?.[selectedZoneId] ?? localSim.spikes[selectedZoneId] ?? 0;
 
-  setText("zi-tier", meta.tier.toUpperCase());
+  const dynTier = sched?.tier || meta.tier;
+  const bessLbl = sched?.bess_protected ? " · BESS PROTECTED" : "";
+  setText("zi-tier", `${dynTier}${bessLbl}`.toUpperCase());
   setText("zi-title", meta.label);
   setText("zi-demand", dem.toFixed(1));
   setText("zi-supplied", sup.toFixed(1));
@@ -1407,6 +1489,75 @@ window.resetManualLoads = async function () {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ zone: "reset", mw: 0 }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.state) applyState(data.state);
+    }
+  } catch (_) {}
+};
+
+window.setPriorityMode = async function (mode) {
+  const targetMode = mode === "manual" ? "manual" : "auto";
+  localSim.priorityMode = targetMode;
+  if (targetMode === "auto") {
+    localSim.priorityOrder = null;
+  } else if (!Array.isArray(localSim.priorityOrder) || !localSim.priorityOrder.length) {
+    localSim.priorityOrder = [...(latestGridState?.priority_order || getDynamicPriority(localSim.hour).order)];
+  }
+  if (!localSim.backendOnline) applyState(computeLocalState(false));
+  try {
+    const res = await fetch(`${API}/api/priority/update`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: targetMode, order: targetMode === "manual" ? localSim.priorityOrder : null }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.state) applyState(data.state);
+    }
+  } catch (_) {}
+};
+
+window.movePriority = async function (zoneId, delta) {
+  if (zoneId === "hospital") return;
+  const current = [...(latestGridState?.priority_order || getDynamicPriority(localSim.hour).order)];
+  const idx = current.indexOf(zoneId);
+  const targetIdx = idx + delta;
+  if (idx < 1 || targetIdx < 1 || targetIdx >= current.length) return;
+  [current[idx], current[targetIdx]] = [current[targetIdx], current[idx]];
+  localSim.priorityMode = "manual";
+  localSim.priorityOrder = current;
+  if (!localSim.backendOnline) applyState(computeLocalState(false));
+  try {
+    const res = await fetch(`${API}/api/priority/update`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "manual", order: current }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.state) applyState(data.state);
+    }
+  } catch (_) {}
+};
+
+window.jumpToTimeWindow = async function (hour) {
+  localSim.hour = hour;
+  currentHour = hour;
+  localSim.priorityMode = "auto";
+  localSim.priorityOrder = null;
+  if (!localSim.backendOnline) applyState(computeLocalState(false));
+  try {
+    await fetch(`${API}/api/priority/update`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "auto", order: null }),
+    });
+    const res = await fetch(`${API}/set_time`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ hour }),
     });
     if (res.ok) {
       const data = await res.json();
@@ -1938,13 +2089,57 @@ function refresh2DViews(state) {
   setText("batt-temp", `${(state.transformer_temp_c ?? 29).toFixed(1)}°C`);
   setBar("bar-temp", ((state.transformer_temp_c ?? 29) / 55) * 100);
 
+  const activeOrder = Array.isArray(state.priority_order) && state.priority_order.length === ZONES.length
+    ? state.priority_order
+    : getDynamicPriority(state.simulated_hour ?? 8.5).order;
+  const bessProt = Array.isArray(state.bess_protected)
+    ? state.bess_protected
+    : getBessProtectedZones(activeOrder, state.simulated_hour ?? 8.5);
+  const prioMode = state.priority_mode || localSim.priorityMode || "auto";
+  const prioRegime = state.priority_regime || getDynamicPriority(state.simulated_hour ?? 8.5).regime;
+  const prioLabel = state.priority_regime_label || getDynamicPriority(state.simulated_hour ?? 8.5).label;
+
+  setText("ctrl-priority-regime", prioLabel);
+  document.getElementById("btn-prio-auto")?.classList.toggle("active", prioMode === "auto");
+  document.getElementById("btn-prio-manual")?.classList.toggle("active", prioMode === "manual");
+  document.querySelectorAll(".window-jump-group .window-pill").forEach((btn) => {
+    btn.classList.toggle("active", prioMode === "auto" && btn.dataset.regime === prioRegime);
+  });
+
+  const prioListEl = document.getElementById("ctrl-priority-list");
+  if (prioListEl) {
+    prioListEl.innerHTML = activeOrder.map((z, idx) => {
+      const sc = state.schedule_status?.[z] || {};
+      const isP1 = z === "hospital";
+      const isBess = bessProt.includes(z);
+      const sup = (state.supplied?.[z] ?? 0).toFixed(1);
+      const dem = (state.demand?.[z] ?? 0).toFixed(1);
+      return `<div class="priority-row ${isP1 ? "is-p1" : ""}">
+        <span class="prio-rank">P${idx + 1}</span>
+        <div>
+          <div style="font-weight:700;font-size:12.5px">${ZONE_META[z].label}</div>
+          <div style="font-size:10.5px;color:var(--text-secondary)">${sc.reason || ""}</div>
+        </div>
+        <span class="panel-badge ${sc.active !== false ? "badge-green" : "badge-amber"}">${sc.active !== false ? "ACTIVE" : "STANDBY"} · ${sc.cap_pct ?? 100}%</span>
+        <span class="prio-bess-pill ${isBess ? "protected" : "unprotected"}">${isBess ? "BESS PROTECTED" : "NO BESS"}</span>
+        <span class="mono" style="font-size:11.5px;text-align:right">${sup} / ${dem} MW</span>
+        <div class="prio-actions">
+          ${isP1
+            ? '<span class="mono" style="font-size:10px;color:var(--green);font-weight:700">LOCKED</span>'
+            : `<button class="prio-move-btn" title="Raise Priority" onclick="movePriority('${z}', -1)" ${idx <= 1 ? "disabled" : ""}>↑</button>
+               <button class="prio-move-btn" title="Lower Priority" onclick="movePriority('${z}', 1)" ${idx >= activeOrder.length - 1 ? "disabled" : ""}>↓</button>`}
+        </div>
+      </div>`;
+    }).join("");
+  }
+
   const schedTbody = document.getElementById("schedule-table");
   if (schedTbody && state.schedule_status) {
-    schedTbody.innerHTML = ZONES.map((z) => {
+    schedTbody.innerHTML = activeOrder.map((z, idx) => {
       const sc = state.schedule_status[z] || {};
       return `<tr>
         <td><strong>${ZONE_META[z].label}</strong></td>
-        <td class="mono">${sc.tier || ZONE_META[z].tier}</td>
+        <td class="mono">${sc.tier || DYNAMIC_TIER_LABELS[idx] || ZONE_META[z].tier}</td>
         <td><span class="panel-badge ${sc.active ? "badge-green" : "badge-amber"}">${sc.active ? "ACTIVE" : "STANDBY"}</span></td>
         <td class="mono">${sc.cap_pct ?? 100}%</td>
         <td class="mono">${(state.supplied?.[z] ?? 0).toFixed(1)} / ${(state.demand?.[z] ?? 0).toFixed(1)} MW</td>
@@ -1957,11 +2152,11 @@ function refresh2DViews(state) {
   const devTable = document.getElementById("device-table");
   if (devTable) {
     const transport = state.mqtt_connected ? "MQTT v5" : "Twin Bus";
-    devTable.innerHTML = ZONES.map((z, idx) => `<tr>
+    devTable.innerHTML = activeOrder.map((z, idx) => `<tr>
       <td class="mono">NODE-0${idx + 1}</td>
       <td>${ZONE_META[z].label}</td>
       <td class="mono" style="color:var(--green)">${transport}</td>
-      <td>${ZONE_META[z].tier}</td>
+      <td>${state.schedule_status?.[z]?.tier || DYNAMIC_TIER_LABELS[idx] || ZONE_META[z].tier}</td>
       <td class="mono">${(state.demand?.[z] ?? 0).toFixed(1)} MW</td>
       <td class="mono" style="color:var(--green)">Live (2s)</td>
     </tr>`).join("");
@@ -2051,11 +2246,31 @@ function applyState(state) {
   setText("temp-ribbon-val", (state.transformer_temp_c ?? 29).toFixed(1));
   setBar("batt-meter", socPct, (state.battery_delta ?? 0) < 0 ? "#f59e0b" : "#00e676");
 
-  ZONES.forEach((z) => {
+  const activeOrder = Array.isArray(state.priority_order) && state.priority_order.length === ZONES.length
+    ? state.priority_order
+    : getDynamicPriority(currentHour).order;
+  const bessProt = Array.isArray(state.bess_protected)
+    ? state.bess_protected
+    : getBessProtectedZones(activeOrder, currentHour);
+  const prioMode = state.priority_mode || localSim.priorityMode || "auto";
+  const prioLabel = state.priority_regime_label || getDynamicPriority(currentHour).label;
+
+  setText("dock-priority-regime", prioLabel);
+  setText("dock-priority-mode", prioMode.toUpperCase());
+
+  const dockList = document.getElementById("dock-zones-list");
+  activeOrder.forEach((z, idx) => {
     const meta = ZONE_META[z];
     const dem = state.demand?.[z] ?? 0;
     const sup = state.supplied?.[z] ?? 0;
     const pct = dem > 0.1 ? Math.min(100, (sup / dem) * 100) : 100;
+    const rankLbl = DYNAMIC_TIER_LABELS[idx] || `P${idx + 1}`;
+    const row = document.getElementById(`zone-row-${z}`);
+    if (dockList && row) dockList.appendChild(row);
+    setText(`tier-tag-${z}`, `P${idx + 1}`);
+    const bessTag = document.getElementById(`bess-tag-${z}`);
+    if (bessTag) bessTag.style.display = bessProt.includes(z) ? "inline" : "none";
+    setText(`info-${z}-priority`, rankLbl);
     setText(`pan-${meta.shortKey}-dem`, dem.toFixed(0));
     setText(`pan-${meta.shortKey}-sup`, sup.toFixed(0));
     setBar(`pan-${meta.shortKey}-bar`, dem <= 0.1 ? 0 : pct, pct >= 98 ? "#00e676" : pct >= 45 ? "#f59e0b" : "#ff3b5c");
