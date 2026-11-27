@@ -28,6 +28,11 @@ PRIORITY = [
     "ev_hub",
 ]
 
+# Only Tier 1–3 critical/high-priority zones may draw BESS emergency discharge.
+# Lower-priority / deferrable zones (commercial, residential, ev_hub) are shed first
+# and NEVER drain the BESS reserve.
+BESS_PROTECTED_ZONES = ("hospital", "industry", "school")
+
 # ── Time-Aware Schedule Policy ────────────────────────────────────────────────
 
 ENTITY_SCHEDULES = {
@@ -206,6 +211,7 @@ def default_plants() -> dict:
         "plant1": {"active": True, "capacity": p1_cap, "type": "thermal", "label": "Thermal Plant 1"},
         "plant2": {"active": True, "capacity": p2_cap, "type": "thermal", "label": "Thermal Plant 2"},
         "solar_wind": {"active": True, "capacity": 280.0, "type": "renewable", "label": "Solar + Wind Farm"},
+        "bess": {"active": True, "capacity": BATTERY_MAX_CHARGE, "type": "storage", "label": "BESS Megapack Yard"},
     }
 
 
@@ -218,7 +224,15 @@ def optimize_grid(
     manual_loads: dict = None,
 ) -> dict:
     """
-    Time-aware smart-grid optimizer with renewable-first dispatch & priority load shedding.
+    Time-aware smart-grid optimizer with strict conservation of energy:
+      1. Apply time-of-day schedule caps + manual operator load spikes.
+      2. Compute true available generation (Solar+Wind first, then Thermal Plants 1 & 2).
+      3. Allocate generation strictly in PRIORITY order (Hospital -> Industry -> School ->
+         Commercial -> Residential -> EV Hub).
+      4. BESS emergency discharge ONLY serves protected high-priority tiers
+         (Hospital, Industry, School) — never lower-priority loads like EV Hub or Residential.
+      5. If total generation + BESS discharge cannot meet demand (including Hospital when all
+         sources are off and BESS is empty/offline), unmet loads are physically shed to 0 MW.
     """
     raw_demand = {}
     for entity in PRIORITY:
@@ -229,42 +243,15 @@ def optimize_grid(
     # Step 1: Schedule caps + manual load spike overrides
     capped_demand, freed_mw, cap_notes = apply_time_caps(raw_demand, hour, manual_loads)
 
-    # Step 2: Redistribute freed capacity
+    # Step 2: Redistribute freed capacity to active higher-priority zones
     demand, redir_notes = redistribute_freed_power(capped_demand, freed_mw, hour)
-    supplied = {entity: demand[entity] for entity in PRIORITY}
-
-    battery_delta = 0.0
-    deficit = 0.0
     actions = list(cap_notes) + list(redir_notes)
 
-    # Step 3: Proactive peak-hour battery boost
-    peak_boost_active = False
-    if _is_peak_hour(hour) and battery_energy > PEAK_BATTERY_BOOST_MW:
-        boost = min(PEAK_BATTERY_BOOST_MW, battery_energy * 0.30)
-        battery_delta -= boost
-        peak_boost_active = True
-        if 18.0 <= (hour % 24.0) < 21.0:
-            supplied["residential"] = min(
-                supplied["residential"] + boost * 0.7,
-                demand["residential"] * 1.15,
-            )
-            actions.append(
-                f"[PEAK] Evening surge (18–21h): BESS discharging {round(boost, 1)} MW for peak shaving."
-            )
-        elif 8.0 <= (hour % 24.0) < 9.0:
-            supplied["industry"] = min(
-                supplied["industry"] + boost * 0.7,
-                demand["industry"] * 1.15,
-            )
-            actions.append(
-                f"[PEAK] Morning ramp (08–09h): BESS discharging {round(boost, 1)} MW -> Industrial & EV support."
-            )
-
-    # Step 4: Available generation capacity (Renewable + Thermal)
+    # Step 3: Available generation capacity (Renewable + Thermal) & BESS breaker state
     if plants is None:
         plants = default_plants()
 
-    # Renewable output depends on time-of-day solar irradiance + wind
+    bess_active = bool(plants.get("bess", {"active": True}).get("active", True))
     solar_wind_cfg = plants.get("solar_wind", {"active": True, "capacity": 280.0})
     renewable_available = 0.0
     if solar_wind_cfg.get("active", True):
@@ -274,17 +261,19 @@ def optimize_grid(
     rated_thermal_total = sum(
         float(p.get("capacity", 0.0))
         for pid, p in plants.items()
-        if pid != "solar_wind"
+        if pid in ("plant1", "plant2")
     )
     thermal_capacity = sum(
         float(p.get("capacity", 0.0))
         for pid, p in plants.items()
-        if pid != "solar_wind" and p.get("active", False)
+        if pid in ("plant1", "plant2") and p.get("active", False)
     )
     dynamic_max_capacity = round(renewable_available + thermal_capacity, 2)
 
-    if dynamic_max_capacity <= 0.1:
-        actions.insert(0, "[CRITICAL] ALL Grid Generation Sources OFFLINE — Islanded on BESS!")
+    if dynamic_max_capacity <= 0.1 and (not bess_active or battery_energy <= 0.1):
+        actions.insert(0, "[CRITICAL] TOTAL BLACKOUT — All generation sources & BESS offline/empty!")
+    elif dynamic_max_capacity <= 0.1:
+        actions.insert(0, "[CRITICAL] ALL Grid Generation Sources OFFLINE — BESS islanding protected tiers only!")
     elif thermal_capacity < rated_thermal_total:
         actions.insert(
             0,
@@ -292,56 +281,85 @@ def optimize_grid(
             f"(Total w/ Renewables: {round(dynamic_max_capacity, 0):.0f} MW).",
         )
 
-    current_total = sum(supplied.values())
-    # Net demand on generation after any proactive peak BESS discharge
-    net_grid_demand = max(0.0, current_total + battery_delta) if battery_delta < 0 else current_total
+    # Step 4: Strict priority allocation of physical generation (no phantom MW)
+    supplied = {entity: 0.0 for entity in PRIORITY}
+    remaining_gen = dynamic_max_capacity
+    for entity in PRIORITY:
+        alloc = min(demand[entity], remaining_gen)
+        supplied[entity] = alloc
+        remaining_gen -= alloc
 
-    if net_grid_demand <= dynamic_max_capacity:
-        excess = dynamic_max_capacity - net_grid_demand
-        to_charge = min(excess, BATTERY_MAX_RATE, BATTERY_MAX_CHARGE - battery_energy)
-        if battery_delta == 0 and to_charge > 1.0:
-            battery_delta = to_charge
-            actions.append(
-                f"[BESS] Surplus clean/grid power: charging reserve +{round(to_charge, 1)} MW."
-            )
-        elif battery_delta == 0:
-            actions.append("[OK] Grid balanced and nominal. BESS reserve at target.")
+    battery_delta = 0.0
+    peak_boost_active = False
+
+    # Step 5: BESS Reserve Logic
+    if remaining_gen > 0.5:
+        # Generation met 100% of all zones with surplus
+        if bess_active:
+            if _is_peak_hour(hour) and battery_energy > PEAK_BATTERY_BOOST_MW and thermal_capacity > 0:
+                # Peak shaving: offset thermal generation for protected high-priority load only
+                protected_thermal_load = max(0.0, sum(supplied[z] for z in BESS_PROTECTED_ZONES) - renewable_available)
+                boost = min(PEAK_BATTERY_BOOST_MW, battery_energy * 0.25, protected_thermal_load)
+                if boost > 1.0:
+                    battery_delta = -boost
+                    peak_boost_active = True
+                    actions.append(
+                        f"[PEAK] Peak shaving: BESS discharging {round(boost, 1)} MW to offset thermal load for critical tiers."
+                    )
+            if battery_delta == 0.0:
+                to_charge = min(remaining_gen, BATTERY_MAX_RATE, BATTERY_MAX_CHARGE - battery_energy)
+                if to_charge > 1.0:
+                    battery_delta = to_charge
+                    actions.append(
+                        f"[BESS] Surplus clean/grid power: charging reserve +{round(to_charge, 1)} MW."
+                    )
+                else:
+                    actions.append("[OK] Grid balanced and nominal. BESS reserve at target.")
+        else:
+            actions.append("[OK] Grid balanced (BESS reserve breaker disconnected).")
     else:
-        deficit = net_grid_demand - dynamic_max_capacity
+        # Generation deficit: ONLY protected tiers (Hospital, Industry, School) may draw BESS!
+        if bess_active and battery_energy > 0.1:
+            bess_budget = min(BATTERY_MAX_RATE, battery_energy)
+            total_bess_used = 0.0
+            for entity in BESS_PROTECTED_ZONES:
+                unmet = demand[entity] - supplied[entity]
+                if unmet > 0.05 and bess_budget > 0.05:
+                    from_bess = min(unmet, bess_budget)
+                    supplied[entity] += from_bess
+                    bess_budget -= from_bess
+                    battery_delta -= from_bess
+                    total_bess_used += from_bess
+            if total_bess_used > 0.1:
+                actions.append(
+                    f"[BESS] Discharging {round(total_bess_used, 1)} MW reserve strictly for protected tiers (Hospital/Industry/School)."
+                )
 
-        # Emergency battery discharge if not already discharging at max rate
-        available_discharge_room = BATTERY_MAX_RATE + battery_delta  # since battery_delta <= 0
-        available_energy_room = max(0.0, battery_energy + battery_delta)
-        from_battery = min(deficit, max(0.0, available_discharge_room), available_energy_room)
-        if from_battery > 0.1:
-            battery_delta -= from_battery
-            deficit -= from_battery
-            actions.append(
-                f"[BESS] Discharging {round(from_battery, 1)} MW from reserve to bridge generation deficit."
-            )
-
-        # Priority load shedding (lowest priority shed first: EV Hub -> Residential -> Commercial -> School -> Industry)
+        # Log all shed zones (including Hospital if generation + BESS could not cover it!)
         for entity in reversed(PRIORITY):
-            if deficit <= 0.05:
-                break
-            if entity == "hospital":
-                actions.append(
-                    "[CRITICAL] Unmet deficit threatens Medical Center — emergency reserve required!"
-                )
-                break
-            can_shed = supplied[entity]
-            if can_shed > 0:
-                shed = min(can_shed, deficit)
-                supplied[entity] -= shed
-                deficit -= shed
-                pct = int(round((shed / demand[entity]) * 100)) if demand[entity] > 0 else 0
-                actions.append(
-                    f"[SHED] Shedding {pct}% (-{round(shed, 1)} MW) from {ENTITY_SCHEDULES[entity]['label']}."
-                )
+            unmet = demand[entity] - supplied[entity]
+            if unmet > 0.05:
+                pct = int(round((unmet / demand[entity]) * 100)) if demand[entity] > 0 else 0
+                if entity == "hospital":
+                    actions.insert(
+                        0,
+                        f"[CRITICAL] Medical Center lost {pct}% (-{round(unmet, 1)} MW) — insufficient generation & BESS reserve!",
+                    )
+                else:
+                    note_suffix = " (BESS reserved for critical tiers)" if entity not in BESS_PROTECTED_ZONES else ""
+                    actions.append(
+                        f"[SHED] Shedding {pct}% (-{round(unmet, 1)} MW) from {ENTITY_SCHEDULES[entity]['label']}{note_suffix}."
+                    )
+
+    # Calculate true unmet deficit across all zones
+    total_demand_final = sum(demand.values())
+    total_supplied_final = sum(supplied.values())
+    deficit = max(0.0, total_demand_final - total_supplied_final)
+    hospital_deficit = max(0.0, demand["hospital"] - supplied["hospital"])
 
     # Status classification
     has_shedding = any(a.startswith("[SHED]") or a.startswith("[CRITICAL]") for a in actions)
-    if deficit > 0.1 or dynamic_max_capacity <= 0.1:
+    if hospital_deficit > 0.1 or dynamic_max_capacity <= 0.1:
         status_code = "CRITICAL"
     elif has_shedding or (battery_delta < 0 and not peak_boost_active):
         status_code = "WARNING"
@@ -352,9 +370,9 @@ def optimize_grid(
 
     new_battery = min(BATTERY_MAX_CHARGE, max(0.0, battery_energy + battery_delta))
 
-    # Calculate actual generation dispatch: Renewable FIRST, then split across active thermal plants
-    total_supplied_final = sum(supplied.values())
+    # Calculate actual generation dispatch: Renewable FIRST, then proportional across active thermal plants
     grid_generation_needed = max(0.0, total_supplied_final + battery_delta)
+    grid_generation_needed = min(grid_generation_needed, dynamic_max_capacity)
 
     renewable_dispatched = min(renewable_available, grid_generation_needed)
     thermal_needed = max(0.0, grid_generation_needed - renewable_dispatched)
@@ -370,13 +388,10 @@ def optimize_grid(
             weight = cap / thermal_capacity
             generation[pid] = round(min(cap, thermal_needed * weight), 2)
 
-    total_gen = sum(generation.values())
     renewable_share_pct = round(
         (renewable_dispatched / max(1.0, total_supplied_final)) * 100.0, 1
-    )
-    # Approximate CO2 avoided vs coal/gas baseline (0.52 tCO2/MWh)
+    ) if total_supplied_final > 0.1 else 0.0
     co2_avoided_tons = round(renewable_dispatched * 0.52, 2)
-    # Approximate transformer thermal load temperature (ambient 25C + load heating)
     transformer_temp_c = round(25.0 + (total_supplied_final / 850.0) * 22.0, 1)
 
     return {
@@ -385,7 +400,7 @@ def optimize_grid(
         "demand": {k: round(v, 2) for k, v in demand.items()},
         "raw_demand": {k: round(v, 2) for k, v in raw_demand.items()},
         "supplied": {k: round(v, 2) for k, v in supplied.items()},
-        "total_demand": round(sum(demand.values()), 2),
+        "total_demand": round(total_demand_final, 2),
         "total_supplied": round(total_supplied_final, 2),
         "battery_energy": round(new_battery, 2),
         "battery_max": BATTERY_MAX_CHARGE,
@@ -400,7 +415,7 @@ def optimize_grid(
         "thermal_capacity_mw": round(thermal_capacity, 2),
         "peak_boost_active": peak_boost_active,
         "freed_mw": round(freed_mw, 2),
-        "deficit_mw": round(max(0.0, deficit), 2),
+        "deficit_mw": round(deficit, 2),
         "schedule_status": get_entity_schedule_status(hour),
         "plants_state": {
             pid: {"active": bool(p.get("active", True)), "capacity": float(p.get("capacity", 0.0))}

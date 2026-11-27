@@ -71,7 +71,7 @@
     <button class="ai-pill-btn" onclick="toggleCopilot()" title="Open IEGMS Grid AI Agent">
       <svg class="ico" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
       <span>Grid AI</span>
-      <span class="ai-pill-provider" id="top-ai-provider">GEMINI</span>
+      <!-- <span class="ai-pill-provider" id="top-ai-provider">.</span> -->
     </button>
     <div class="status-pill" id="top-status-pill">
       <span class="status-dot"></span>
@@ -270,6 +270,11 @@
           <div class="toggle-row" style="margin-bottom:11px">
             <label class="toggle"><input type="checkbox" id="toggle-solar_wind" checked onchange="togglePlant('solar_wind', this.checked)"><div class="toggle-track"></div><div class="toggle-thumb"></div></label>
             <div style="flex:1"><div style="font-weight:600">Solar + Wind Farm</div><div style="font-size:10.5px;color:var(--green)" class="mono"><span id="gen-sw-lbl">0</span> / 280 MW Clean</div></div>
+          </div>
+
+          <div class="toggle-row" style="margin-bottom:11px">
+            <label class="toggle"><input type="checkbox" id="toggle-bess" checked onchange="togglePlant('bess', this.checked)"><div class="toggle-track"></div><div class="toggle-thumb"></div></label>
+            <div style="flex:1"><div style="font-weight:600">BESS Megapack Reserve</div><div style="font-size:10.5px;color:var(--text-secondary)" class="mono">Protected Tiers (P1–P3) Only</div></div>
           </div>
 
           <div style="padding:8px 10px;border-radius:9px;background:rgba(255,255,255,0.025);border:1px solid var(--border-subtle);margin-bottom:9px">
@@ -699,7 +704,7 @@
   </div>
 </div>
 
-<script src="app.js?v=6.2"></script>
+<script src="app.js?v=6.3"></script>
 <script type="module">
   import * as THREE from 'three';
   import { OrbitControls } from 'three/addons/controls/OrbitControls.js';

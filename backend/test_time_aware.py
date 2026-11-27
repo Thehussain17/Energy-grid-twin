@@ -32,22 +32,75 @@ print(f"Freed MW: {result['freed_mw']} | Peak boost: {result['peak_boost_active'
 assert result["supplied"]["school"] < 10, "School should have minimal supply at 19h"
 assert result["freed_mw"] > 80, "Should have freed significant MW from school & industry at 19h"
 
-# Test 5: Manual load spike stress test actually increases demand & triggers shedding when overloaded
+# Test 5: Manual load spike stress test triggers shedding WITHOUT draining BESS for EV Hub/Residential
 spike_res = optimize_grid(
     loads,
     loads,
-    40.0,
+    200.0,
     hour=14.0,
     plants={
-        "plant1": {"active": True, "capacity": 300.0},
+        "plant1": {"active": True, "capacity": 400.0},
         "plant2": {"active": False, "capacity": 300.0},
         "solar_wind": {"active": False, "capacity": 280.0},
+        "bess": {"active": True, "capacity": 400.0},
     },
     manual_loads={"residential": 350.0, "ev_hub": 200.0},
 )
-print(f"Stress test status={spike_res['status_code']} | EV supplied={spike_res['supplied']['ev_hub']:.1f} / {spike_res['demand']['ev_hub']:.1f}")
+print(f"Stress test status={spike_res['status_code']} | EV supplied={spike_res['supplied']['ev_hub']:.1f} / {spike_res['demand']['ev_hub']:.1f} | BESS delta={spike_res['battery_delta']}")
 assert spike_res["demand"]["residential"] > 450.0, "Manual spike must raise residential demand"
-assert spike_res["supplied"]["ev_hub"] < spike_res["demand"]["ev_hub"], "EV Hub should shed first under stress"
+assert spike_res["supplied"]["ev_hub"] == 0.0, "EV Hub should shed completely under stress"
+assert spike_res["battery_delta"] == 0.0, "BESS must NOT discharge for lower-priority zones (EV/Residential/Commercial)"
 assert spike_res["supplied"]["hospital"] == spike_res["demand"]["hospital"], "Hospital must stay protected"
 
-print("\nALL OPTIMIZER & SCHEDULE TESTS PASSED")
+# Test 6: All sources OFF + BESS empty/offline -> Hospital MUST lose power (0 MW, no phantom supply)
+blackout_empty = optimize_grid(
+    loads,
+    loads,
+    0.0,
+    hour=20.0,
+    plants={
+        "plant1": {"active": False, "capacity": 300.0},
+        "plant2": {"active": False, "capacity": 300.0},
+        "solar_wind": {"active": False, "capacity": 280.0},
+        "bess": {"active": True, "capacity": 400.0},
+    },
+)
+assert blackout_empty["supplied"]["hospital"] == 0.0, "Hospital must get 0 MW when all sources are off and BESS is empty"
+assert blackout_empty["total_supplied"] == 0.0, "Total supplied must be 0 MW in full blackout"
+assert blackout_empty["status_code"] == "CRITICAL"
+
+blackout_bess_off = optimize_grid(
+    loads,
+    loads,
+    250.0,
+    hour=20.0,
+    plants={
+        "plant1": {"active": False, "capacity": 300.0},
+        "plant2": {"active": False, "capacity": 300.0},
+        "solar_wind": {"active": False, "capacity": 280.0},
+        "bess": {"active": False, "capacity": 400.0},
+    },
+)
+assert blackout_bess_off["supplied"]["hospital"] == 0.0, "Hospital must get 0 MW when all sources and BESS breaker are off"
+assert blackout_bess_off["battery_delta"] == 0.0
+
+# Test 7: All plants OFF but BESS online with charge -> ONLY protected tiers get BESS; EV/Residential/Commercial stay 0 MW
+island_res = optimize_grid(
+    loads,
+    loads,
+    250.0,
+    hour=14.0,
+    plants={
+        "plant1": {"active": False, "capacity": 300.0},
+        "plant2": {"active": False, "capacity": 300.0},
+        "solar_wind": {"active": False, "capacity": 280.0},
+        "bess": {"active": True, "capacity": 400.0},
+    },
+)
+assert island_res["supplied"]["hospital"] == island_res["demand"]["hospital"]
+assert island_res["supplied"]["ev_hub"] == 0.0
+assert island_res["supplied"]["residential"] == 0.0
+assert island_res["supplied"]["commercial"] == 0.0
+assert island_res["battery_delta"] < 0.0
+
+print("\nALL OPTIMIZER, BESS PRIORITY & BLACKOUT TESTS PASSED")

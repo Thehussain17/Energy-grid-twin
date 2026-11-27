@@ -63,14 +63,16 @@ function interpCurve(hour, curve) {
   return curve[keys[0]];
 }
 
+const BESS_PROTECTED_ZONES = ["hospital", "industry", "school"];
+
 const localSim = {
   backendOnline: false,
   hour: 8.5,
   paused: false,
   speed: 1,
   battery: 220,
-  plants: { solar_wind: true, plant1: true, plant2: true },
-  plantCaps: { solar_wind: 280, plant1: 300, plant2: 300 },
+  plants: { solar_wind: true, plant1: true, plant2: true, bess: true },
+  plantCaps: { solar_wind: 280, plant1: 300, plant2: 300, bess: 400 },
   spikes: { hospital: 0, industry: 0, school: 0, commercial: 0, residential: 0, ev_hub: 0 },
 };
 
@@ -100,53 +102,82 @@ function computeLocalState(advanceBatt = false) {
     };
   });
 
-  const supplied = { ...demand };
-  const isPeak = (h >= 8 && h < 9) || (h >= 18 && h < 21);
-  let battDelta = 0;
-  if (isPeak && localSim.battery > 80) {
-    battDelta = -Math.min(70, localSim.battery * 0.25);
-    actions.push(`[PEAK] Peak shaving active: BESS discharging ${Math.abs(battDelta).toFixed(1)} MW.`);
-  }
-
   const renAvail = localSim.plants.solar_wind ? +interpCurve(h, LOCAL_RENEWABLE).toFixed(1) : 0;
   const p1Cap = localSim.plants.plant1 ? localSim.plantCaps.plant1 : 0;
   const p2Cap = localSim.plants.plant2 ? localSim.plantCaps.plant2 : 0;
   const thermCap = p1Cap + p2Cap;
   const maxCap = +(renAvail + thermCap).toFixed(1);
+  const bessOn = !!localSim.plants.bess;
 
-  const totalRaw = Object.values(supplied).reduce((a, b) => a + b, 0);
-  const netNeeded = Math.max(0, totalRaw + battDelta);
-  let deficit = 0;
+  if (maxCap <= 0.1 && (!bessOn || localSim.battery <= 0.1)) {
+    actions.unshift("[CRITICAL] TOTAL BLACKOUT — All generation sources & BESS offline/empty!");
+  } else if (maxCap <= 0.1) {
+    actions.unshift("[CRITICAL] ALL Grid Generation Sources OFFLINE — BESS islanding protected tiers only!");
+  }
 
-  if (netNeeded <= maxCap) {
-    const excess = maxCap - netNeeded;
-    if (battDelta === 0 && excess > 2 && localSim.battery < 400) {
-      battDelta = Math.min(excess, 100, 400 - localSim.battery);
-      actions.push(`[BESS] Surplus clean capacity: charging reserve +${battDelta.toFixed(1)} MW.`);
+  // Strict conservation-of-energy allocation in PRIORITY order
+  const supplied = {};
+  let remGen = maxCap;
+  ZONES.forEach((z) => {
+    const alloc = Math.min(demand[z], remGen);
+    supplied[z] = +alloc.toFixed(1);
+    remGen = Math.max(0, remGen - alloc);
+  });
+
+  const isPeak = (h >= 8 && h < 9) || (h >= 18 && h < 21);
+  let battDelta = 0;
+
+  if (remGen > 0.5) {
+    if (bessOn) {
+      if (isPeak && localSim.battery > 80 && thermCap > 0) {
+        const protTherm = Math.max(0, BESS_PROTECTED_ZONES.reduce((a, z) => a + supplied[z], 0) - renAvail);
+        const boost = Math.min(70, localSim.battery * 0.25, protTherm);
+        if (boost > 1) {
+          battDelta = -boost;
+          actions.push(`[PEAK] Peak shaving: BESS discharging ${boost.toFixed(1)} MW to offset thermal load for critical tiers.`);
+        }
+      }
+      if (battDelta === 0 && localSim.battery < 400) {
+        battDelta = Math.min(remGen, 100, 400 - localSim.battery);
+        actions.push(`[BESS] Surplus clean capacity: charging reserve +${battDelta.toFixed(1)} MW.`);
+      } else if (battDelta === 0 && actions.length === 0) {
+        actions.push("[OK] All 6 smart-grid zones balanced within nominal tolerances.");
+      }
     } else if (actions.length === 0) {
-      actions.push("[OK] All 6 smart-grid zones balanced within nominal tolerances.");
+      actions.push("[OK] Grid balanced (BESS reserve breaker disconnected).");
     }
   } else {
-    deficit = netNeeded - maxCap;
-    const fromBatt = Math.min(deficit, 120 + battDelta, Math.max(0, localSim.battery + battDelta));
-    if (fromBatt > 0.5) {
-      battDelta -= fromBatt;
-      deficit -= fromBatt;
-      actions.push(`[BESS] Reserve discharging ${fromBatt.toFixed(1)} MW to cover deficit.`);
+    // Generation deficit: BESS ONLY discharges for protected tiers (Hospital, Industry, School)
+    if (bessOn && localSim.battery > 0.1) {
+      let bessBudget = Math.min(120, localSim.battery);
+      let bessUsed = 0;
+      BESS_PROTECTED_ZONES.forEach((z) => {
+        const unmet = demand[z] - supplied[z];
+        if (unmet > 0.05 && bessBudget > 0.05) {
+          const fromBess = Math.min(unmet, bessBudget);
+          supplied[z] = +(supplied[z] + fromBess).toFixed(1);
+          bessBudget -= fromBess;
+          battDelta -= fromBess;
+          bessUsed += fromBess;
+        }
+      });
+      if (bessUsed > 0.1) {
+        actions.push(`[BESS] Discharging ${bessUsed.toFixed(1)} MW reserve strictly for protected tiers (Hospital/Industry/School).`);
+      }
     }
+
+    // Log all shed zones including Hospital if generation + BESS couldn't cover it
     for (let i = ZONES.length - 1; i >= 0; i--) {
       const z = ZONES[i];
-      if (deficit <= 0.1) break;
-      if (z === "hospital") {
-        actions.unshift("[CRITICAL] Deficit exceeds sheddable load — Medical Center at risk!");
-        break;
-      }
-      const shed = Math.min(supplied[z], deficit);
-      if (shed > 0) {
-        supplied[z] = +(supplied[z] - shed).toFixed(1);
-        deficit -= shed;
-        const pct = Math.round((shed / Math.max(1, demand[z])) * 100);
-        actions.push(`[SHED] Shedding ${pct}% (-${shed.toFixed(1)} MW) from ${ZONE_META[z].label}.`);
+      const unmet = demand[z] - supplied[z];
+      if (unmet > 0.05) {
+        const pct = Math.round((unmet / Math.max(1, demand[z])) * 100);
+        if (z === "hospital") {
+          actions.unshift(`[CRITICAL] Medical Center lost ${pct}% (-${unmet.toFixed(1)} MW) — insufficient generation & BESS reserve!`);
+        } else {
+          const tag = BESS_PROTECTED_ZONES.includes(z) ? "" : " (BESS reserved for critical tiers)";
+          actions.push(`[SHED] Shedding ${pct}% (-${unmet.toFixed(1)} MW) from ${ZONE_META[z].label}${tag}.`);
+        }
       }
     }
   }
@@ -157,14 +188,16 @@ function computeLocalState(advanceBatt = false) {
 
   const totalSup = +Object.values(supplied).reduce((a, b) => a + b, 0).toFixed(1);
   const totalDem = +Object.values(demand).reduce((a, b) => a + b, 0).toFixed(1);
-  const genNeed = Math.max(0, totalSup + battDelta);
+  const deficit = Math.max(0, totalDem - totalSup);
+  const hospDeficit = Math.max(0, demand.hospital - supplied.hospital);
+  const genNeed = Math.min(maxCap, Math.max(0, totalSup + battDelta));
   const renUsed = +Math.min(renAvail, genNeed).toFixed(1);
   const thermNeed = Math.max(0, genNeed - renUsed);
   const p1 = p1Cap > 0 && thermCap > 0 ? +Math.min(p1Cap, thermNeed * (p1Cap / thermCap)).toFixed(1) : 0;
   const p2 = p2Cap > 0 && thermCap > 0 ? +Math.min(p2Cap, thermNeed * (p2Cap / thermCap)).toFixed(1) : 0;
 
-  const hasShed = actions.some((a) => a.startsWith("[SHED]"));
-  const status = deficit > 0.5 || maxCap === 0 ? "CRITICAL" : hasShed ? "WARNING" : isPeak ? "PEAK" : "NORMAL";
+  const hasShed = actions.some((a) => a.startsWith("[SHED]") || a.startsWith("[CRITICAL]"));
+  const status = hospDeficit > 0.1 || maxCap <= 0.1 ? "CRITICAL" : hasShed ? "WARNING" : isPeak ? "PEAK" : "NORMAL";
 
   return {
     status_code: status,
@@ -183,9 +216,10 @@ function computeLocalState(advanceBatt = false) {
       solar_wind: { active: localSim.plants.solar_wind, capacity: localSim.plantCaps.solar_wind },
       plant1: { active: localSim.plants.plant1, capacity: localSim.plantCaps.plant1 },
       plant2: { active: localSim.plants.plant2, capacity: localSim.plantCaps.plant2 },
+      bess: { active: localSim.plants.bess, capacity: 400 },
     },
     manual_loads: { ...localSim.spikes },
-    renewable_share_pct: +((renUsed / Math.max(1, totalSup)) * 100).toFixed(1),
+    renewable_share_pct: totalSup > 0.1 ? +((renUsed / totalSup) * 100).toFixed(1) : 0,
     co2_avoided_tons: +(renUsed * 0.52).toFixed(1),
     transformer_temp_c: +(25 + (totalSup / 850) * 22).toFixed(1),
     max_capacity_mw: maxCap,
